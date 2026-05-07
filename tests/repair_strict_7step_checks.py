@@ -207,6 +207,53 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(tasks[0]["workflow_code"], "wf-1")
         self.assertEqual(tasks[0]["task_code"], "task-1")
 
+    def test_step2_search_in_workflow_marks_forbidden_task_for_manual_review(self):
+        module = load_module()
+
+        def fake_ds_api_get(endpoint):
+            if endpoint == "/projects/default-project/workflow-definition/wf-1":
+                return False, {}, "not json"
+            if endpoint == "/projects/default-project/process-definition/wf-1":
+                return True, {
+                    "processDefinition": {"name": "DWD"},
+                    "taskDefinitionList": [
+                        {
+                            "code": "task-1",
+                            "name": "dwd_fox_mission_log",
+                            "flag": "NO",
+                            "taskParams": {"sql": "select 1"},
+                        }
+                    ],
+                }, ""
+            raise AssertionError(endpoint)
+
+        with mock.patch.object(module, "ds_api_get", side_effect=fake_ds_api_get):
+            result = module.step2_search_in_workflow("wf-1", "dwd_fox_mission_log")
+
+        self.assertEqual(result["task_code"], "task-1")
+        self.assertEqual(result["task_flag"], "NO")
+
+    def test_apply_repair_strategy_escalates_forbidden_task_to_manual_review(self):
+        module = load_module()
+        tasks = [
+            {
+                "table": "dwd_fox_mission_log",
+                "dt": "2026-04-29",
+                "diff": 123,
+                "task_flag": "NO",
+                "workflow_name": "DWD",
+                "task_name": "dwd_fox_mission_log",
+            }
+        ]
+
+        runnable, manual_review = module.apply_repair_strategy(tasks, {})
+
+        self.assertEqual(runnable, [])
+        self.assertEqual(len(manual_review), 1)
+        self.assertEqual(manual_review[0]["status"], "skipped_manual_review")
+        self.assertIn("禁止执行", manual_review[0]["error"])
+        self.assertIn("123", manual_review[0]["error"])
+
     def test_step4_wait_and_check_falls_back_to_instance_list_when_detail_query_fails(self):
         module = load_module()
         running_instances = [
@@ -623,6 +670,31 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertIn("dwd_fox_call_history", report)
         self.assertIn("dwd_asset_biz_report", report)
         self.assertIn("底层是否需要删数", report)
+
+    def test_generate_tv_report_includes_diff_for_manual_review_items(self):
+        module = load_module()
+        summary = {
+            "initial_alert_count": 1,
+            "resolved_count": 0,
+            "remaining_count": 1,
+            "manual_review_count": 1,
+            "rerun_tasks": [],
+            "resolved_tasks": [],
+            "remaining_tasks": [
+                {
+                    "table": "dwd_fox_mission_log",
+                    "dt": "2026-04-29",
+                    "diff": 456,
+                    "error": "节点被配置为禁止执行，需人工查看修复",
+                }
+            ],
+            "post_fuyan_remaining_tables": {"dwd_fox_mission_log"},
+        }
+
+        with mock.patch.object(module, "log"):
+            report = module.generate_tv_report(summary, [])
+
+        self.assertIn("数据量差异: 456", report)
 
     def test_evaluate_repair_outcome_queries_remaining_tables_after_fuyan_wait(self):
         module = load_module()

@@ -384,7 +384,8 @@ def step2_search_in_workflow(workflow_code, table_name):
                 'workflow_code': workflow_code,
                 'workflow_name': detail.get('processDefinition', {}).get('name', ''),
                 'task_code': task.get('code'),
-                'task_name': task_name
+                'task_name': task_name,
+                'task_flag': task.get('flag', 'YES'),
             }
         
         # 匹配SQL
@@ -401,7 +402,8 @@ def step2_search_in_workflow(workflow_code, table_name):
                 'workflow_code': workflow_code,
                 'workflow_name': detail.get('processDefinition', {}).get('name', ''),
                 'task_code': task.get('code'),
-                'task_name': task_name
+                'task_name': task_name,
+                'task_flag': task.get('flag', 'YES'),
             }
     
     return None
@@ -470,10 +472,12 @@ def step2_find_locations(alerts):
                 'alert_id': alert['id'],
                 'table': table,
                 'dt': alert['dt'],
+                'diff': alert.get('diff'),
                 'workflow_code': location['workflow_code'],
                 'workflow_name': location['workflow_name'],
                 'task_code': location['task_code'],
-                'task_name': location['task_name']
+                'task_name': location['task_name'],
+                'task_flag': location.get('task_flag', 'YES'),
             }
             log(f"  ✅ {location['workflow_name']} -> {location['task_name']}")
             found_count += 1
@@ -482,10 +486,12 @@ def step2_find_locations(alerts):
                 'alert_id': alert['id'],
                 'table': table,
                 'dt': alert['dt'],
+                'diff': alert.get('diff'),
                 'workflow_code': '',
                 'workflow_name': '未找到',
                 'task_code': '',
-                'task_name': ''
+                'task_name': '',
+                'task_flag': '',
             }
             log(f"  ❌ 未找到")
         
@@ -532,12 +538,28 @@ def build_redundant_data_manual_review_reason():
     return '疑似当前层数据多于底层，重跑一次后仍未恢复，建议检查底层是否需要删数，并人工判断修复'
 
 
+def build_forbidden_task_manual_review_reason(task):
+    """构造节点被禁用时的人工处理提示"""
+    diff = task.get('diff')
+    diff_suffix = f"，数据量差异: {diff}" if diff not in (None, '') else ''
+    workflow_name = task.get('workflow_name') or '未知工作流'
+    task_name = task.get('task_name') or task.get('table') or '未知节点'
+    return f"节点被配置为禁止执行，需人工查看修复（工作流: {workflow_name}，节点: {task_name}{diff_suffix}）"
+
+
 def apply_repair_strategy(tasks, strategy_state):
     """应用修复策略：疑似冗余数据仅允许自动重跑一次"""
     runnable_tasks = []
     manual_review_tasks = []
 
     for task in tasks:
+        if str(task.get('task_flag', 'YES')).upper() == 'NO':
+            manual_task = dict(task)
+            manual_task['status'] = 'skipped_manual_review'
+            manual_task['error'] = build_forbidden_task_manual_review_reason(task)
+            manual_review_tasks.append(manual_task)
+            continue
+
         if not is_suspected_redundant_data(task):
             runnable_tasks.append(task)
             continue
@@ -1074,6 +1096,8 @@ def generate_tv_report(summary, fuyan_results):
         for task in summary['remaining_tasks']:
             report_lines.append(f"  • {task['table']}")
             report_lines.append(f"    原因: {task.get('error', '复验完成后告警仍存在，需人工处理')}")
+            if task.get('diff') not in (None, ''):
+                report_lines.append(f"    数据量差异: {task['diff']}")
         report_lines.append("")
     
     report_lines.append("🔄 【复验工作流状态】")
