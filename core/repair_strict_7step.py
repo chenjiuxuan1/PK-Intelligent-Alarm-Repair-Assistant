@@ -40,6 +40,59 @@ MANUAL_REVIEW_STATE_FILE = WORKSPACE_CONFIG['manual_review_state_file']
 MAINTENANCE_KEYWORDS = ['补充', '删除', '清理', '修复', '历史', '冗余', '临时', 'test', 'copy', '手插入']
 
 
+def get_workflow_definition_detail(workflow_code):
+    """兼容 DS 3.3 workflow-definition 与 DS 3.2 process-definition 详情接口"""
+    endpoints = [
+        f"/projects/{PROJECT_CODE}/workflow-definition/{workflow_code}",
+        f"/projects/{PROJECT_CODE}/process-definition/{workflow_code}",
+    ]
+    last_msg = ""
+    for endpoint in endpoints:
+        success, detail, msg = ds_api_get(endpoint)
+        if success:
+            return True, detail, msg
+        last_msg = msg
+    return False, {}, last_msg
+
+
+def get_workflow_definition_list():
+    """兼容 DS 3.3 workflow-definition 与 DS 3.2 process-definition 列表接口"""
+    endpoints = [
+        f"/projects/{PROJECT_CODE}/workflow-definition?pageNo=1&pageSize=100",
+        f"/projects/{PROJECT_CODE}/process-definition?pageNo=1&pageSize=100",
+    ]
+    last_msg = ""
+    for endpoint in endpoints:
+        success, data, msg = ds_api_get(endpoint)
+        if success:
+            return True, data, msg
+        last_msg = msg
+    return False, {}, last_msg
+
+
+def get_instance_detail(project_code, instance_id):
+    """兼容 DS 3.3 workflow-instances 与 DS 3.2 process-instances 详情接口"""
+    endpoints = [
+        f"/projects/{project_code}/workflow-instances/{instance_id}",
+        f"/projects/{project_code}/process-instances/{instance_id}",
+    ]
+    last_msg = ""
+    for endpoint in endpoints:
+        success, data, msg = ds_api_get(endpoint)
+        if success:
+            return True, data, msg
+        last_msg = msg
+    return False, {}, last_msg
+
+
+def get_fuyan_name(workflow):
+    return workflow.get('name') or workflow.get('workflow_name') or '未命名复验工作流'
+
+
+def get_fuyan_code(workflow):
+    return workflow.get('code') or workflow.get('workflow_code') or ''
+
+
 def log(msg):
     ts = datetime.now().strftime('%H:%M:%S')
     print(f"[{ts}] {msg}", flush=True)
@@ -242,7 +295,7 @@ def step1_scan_alerts():
 
 def step2_search_in_workflow(workflow_code, table_name):
     """在指定工作流中搜索表"""
-    success, detail, msg = ds_api_get(f"/projects/{PROJECT_CODE}/workflow-definition/{workflow_code}")
+    success, detail, msg = get_workflow_definition_detail(workflow_code)
     if not success:
         return None
     
@@ -327,7 +380,7 @@ def step2_find_locations(alerts):
         if not location:
             if all_workflows is None:
                 log(f"  在优先工作流中未找到，获取所有工作流列表...")
-                success, data, msg = ds_api_get(f"/projects/{PROJECT_CODE}/workflow-definition?pageNo=1&pageSize=100")
+                success, data, msg = get_workflow_definition_list()
                 if success:
                     all_workflows = data.get('totalList', [])
                     log(f"  获取到 {len(all_workflows)} 个工作流")
@@ -500,7 +553,7 @@ def step3_start_repair(tasks):
             'scheduleTime': schedule_time
         }
         
-        success, result, msg = ds_api_post(f"/projects/{PROJECT_CODE}/executors/start-workflow-instance", data)
+        success, result, msg = ds_api_post(f"/projects/{PROJECT_CODE}/executors/start-process-instance", data)
         
         if success:
             instance_data = result.get('data')
@@ -568,7 +621,7 @@ def step4_wait_and_check(running_instances, poll_interval=30, max_wait=1800):
             instance_id = item['instance_id']
             
             # 查询实例状态
-            success, data, msg = ds_api_get(f"/projects/{PROJECT_CODE}/workflow-instances/{instance_id}")
+            success, data, msg = get_instance_detail(PROJECT_CODE, instance_id)
             
             if success and data:
                 state = data.get('state', 'UNKNOWN')
@@ -669,6 +722,7 @@ def step5_execute_fuyan(completed_tasks, failed_tasks, alerts):
     # 记录重跑次数
     log("\n5.1 记录重跑次数...")
     record_file = WORKSPACE_CONFIG['repair_counts_file']
+    os.makedirs(os.path.dirname(record_file), exist_ok=True)
     counts = {}
     if os.path.exists(record_file):
         with open(record_file, 'r') as f:
@@ -690,11 +744,13 @@ def step5_execute_fuyan(completed_tasks, failed_tasks, alerts):
     fuyan_results = []
     
     for i, fuyan in enumerate(FUYAN_WORKFLOWS, 1):
-        log(f"  [{i}] {fuyan['name']}")
+        fuyan_name = get_fuyan_name(fuyan)
+        fuyan_code = get_fuyan_code(fuyan)
+        log(f"  [{i}] {fuyan_name}")
         
         schedule_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         data = {
-            'workflowDefinitionCode': fuyan['code'],
+            'processDefinitionCode': fuyan_code,
             'failureStrategy': 'CONTINUE',
             'warningType': 'NONE',
             'warningGroupId': 0,
@@ -705,17 +761,17 @@ def step5_execute_fuyan(completed_tasks, failed_tasks, alerts):
             'scheduleTime': schedule_time
         }
         
-        success, result, msg = ds_api_post(f"/projects/{FUYAN_PROJECT_CODE}/executors/start-workflow-instance", data)
+        success, result, msg = ds_api_post(f"/projects/{FUYAN_PROJECT_CODE}/executors/start-process-instance", data)
         if success:
             instance_id = result.get('data')
             if isinstance(instance_id, list) and len(instance_id) > 0:
                 instance_id = instance_id[0]
             log(f"    ✅ 启动成功: {instance_id}")
-            fuyan_results.append({'name': fuyan['name'], 'id': instance_id, 'status': 'success'})
+            fuyan_results.append({'name': fuyan_name, 'id': instance_id, 'status': 'success'})
         else:
             error_msg = result.get('msg', '未知错误')
             log(f"    ❌ 启动失败: {error_msg}")
-            fuyan_results.append({'name': fuyan['name'], 'status': 'failed', 'error': error_msg})
+            fuyan_results.append({'name': fuyan_name, 'status': 'failed', 'error': error_msg})
     
     return fuyan_results
 
@@ -739,6 +795,10 @@ def wait_for_fuyan_results(fuyan_results, poll_interval=30, max_wait=1800):
             success, data, msg = ds_api_get(
                 f"/projects/{FUYAN_PROJECT_CODE}/workflow-instances/{instance_id}"
             )
+            if not success or not data:
+                success, data, msg = ds_api_get(
+                    f"/projects/{FUYAN_PROJECT_CODE}/process-instances/{instance_id}"
+                )
             if not success or not data:
                 item['final_status'] = 'query_failed'
                 item['error'] = msg or '查询复验实例状态失败'

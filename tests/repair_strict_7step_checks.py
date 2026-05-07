@@ -66,6 +66,69 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(module.MANUAL_REVIEW_STATE_FILE, "/tmp/default-workspace/auto_repair_records/manual_review_state.json")
         self.assertEqual(module.FUYAN_WORKFLOWS, [{"name": "默认复验", "code": "wf-default", "level": "all"}])
 
+    def test_step5_execute_fuyan_accepts_workflow_name_style_config(self):
+        module = load_module()
+        module.FUYAN_WORKFLOWS = [
+            {
+                "project_name": "印尼数仓-数据质量",
+                "project_code": "pj-1",
+                "workflow_name": "每日复验全级别数据(W-1)",
+                "workflow_code": "wf-1",
+                "level": "全级别",
+            }
+        ]
+
+        with mock.patch.object(module, "ds_api_post", return_value=(True, {"data": [12345]}, "")):
+            results = module.step5_execute_fuyan([], [], [])
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["name"], "每日复验全级别数据(W-1)")
+        self.assertEqual(results[0]["id"], 12345)
+
+    def test_step2_search_in_workflow_falls_back_to_process_definition_for_ds32(self):
+        module = load_module()
+
+        def fake_ds_api_get(endpoint):
+            if endpoint == "/projects/default-project/workflow-definition/wf-1":
+                return False, {}, "not json"
+            if endpoint == "/projects/default-project/process-definition/wf-1":
+                return True, {
+                    "processDefinition": {"name": "DWD"},
+                    "taskDefinitionList": [{"code": "task-1", "name": "dwd_fox_mission_log"}],
+                }, ""
+            raise AssertionError(endpoint)
+
+        with mock.patch.object(module, "ds_api_get", side_effect=fake_ds_api_get):
+            result = module.step2_search_in_workflow("wf-1", "dwd_fox_mission_log")
+
+        self.assertEqual(result["workflow_name"], "DWD")
+        self.assertEqual(result["task_code"], "task-1")
+
+    def test_step2_find_locations_falls_back_to_process_definition_list_for_ds32(self):
+        module = load_module()
+
+        alerts = [{"id": 1, "table": "dwd_fox_mission_log", "dt": "2026-04-29"}]
+
+        def fake_ds_api_get(endpoint):
+            if endpoint.endswith("/workflow-definition?pageNo=1&pageSize=100"):
+                return False, {}, "not json"
+            if endpoint.endswith("/process-definition?pageNo=1&pageSize=100"):
+                return True, {"totalList": [{"code": "wf-1"}]}, ""
+            if endpoint == "/projects/default-project/workflow-definition/wf-1":
+                return False, {}, "not json"
+            if endpoint == "/projects/default-project/process-definition/wf-1":
+                return True, {
+                    "processDefinition": {"name": "DWD"},
+                    "taskDefinitionList": [{"code": "task-1", "name": "dwd_fox_mission_log"}],
+                }, ""
+            return False, {}, "not found"
+
+        with mock.patch.object(module, "ds_api_get", side_effect=fake_ds_api_get):
+            tasks = module.step2_find_locations(alerts)
+
+        self.assertEqual(tasks[0]["workflow_code"], "wf-1")
+        self.assertEqual(tasks[0]["task_code"], "task-1")
+
     def test_resolve_repair_table_prefers_downstream_warehouse_layer_over_ods(self):
         module = load_module()
         row = {
