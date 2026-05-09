@@ -207,6 +207,48 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(tasks[0]["workflow_code"], "wf-1")
         self.assertEqual(tasks[0]["task_code"], "task-1")
 
+    def test_step2_find_locations_scans_multiple_workflow_pages(self):
+        module = load_module()
+        alerts = [{"id": 1, "table": "dwd_c_coupon", "dt": "2026-05-08", "diff": 1}]
+
+        def fake_ds_api_get(endpoint):
+            if endpoint.endswith("/workflow-definition?pageNo=1&pageSize=100"):
+                return False, {}, "not json"
+            if endpoint.endswith("/process-definition?pageNo=1&pageSize=100"):
+                return True, {
+                    "totalList": [{"code": "wf-page1"}],
+                    "totalPage": 2,
+                    "currentPage": 1,
+                }, ""
+            if endpoint.endswith("/process-definition?pageNo=2&pageSize=100"):
+                return True, {
+                    "totalList": [{"code": "wf-page2"}],
+                    "totalPage": 2,
+                    "currentPage": 2,
+                }, ""
+            if endpoint == "/projects/default-project/workflow-definition/wf-page1":
+                return False, {}, "not json"
+            if endpoint == "/projects/default-project/process-definition/wf-page1":
+                return True, {
+                    "processDefinition": {"name": "PAGE1"},
+                    "taskDefinitionList": [{"code": "task-a", "name": "dwd_other_table"}],
+                }, ""
+            if endpoint == "/projects/default-project/workflow-definition/wf-page2":
+                return False, {}, "not json"
+            if endpoint == "/projects/default-project/process-definition/wf-page2":
+                return True, {
+                    "processDefinition": {"name": "PAGE2"},
+                    "taskDefinitionList": [{"code": "task-b", "name": "dwd_c_coupon"}],
+                }, ""
+            return False, {}, f"unexpected endpoint: {endpoint}"
+
+        with mock.patch.object(module, "ds_api_get", side_effect=fake_ds_api_get):
+            tasks = module.step2_find_locations(alerts)
+
+        self.assertEqual(tasks[0]["workflow_code"], "wf-page2")
+        self.assertEqual(tasks[0]["task_code"], "task-b")
+        self.assertEqual(tasks[0]["workflow_name"], "PAGE2")
+
     def test_step2_search_in_workflow_marks_forbidden_task_for_manual_review(self):
         module = load_module()
 

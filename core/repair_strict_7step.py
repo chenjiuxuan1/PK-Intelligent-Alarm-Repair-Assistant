@@ -57,17 +57,33 @@ def get_workflow_definition_detail(workflow_code):
 
 
 def get_workflow_definition_list():
-    """兼容 DS 3.3 workflow-definition 与 DS 3.2 process-definition 列表接口"""
-    endpoints = [
-        f"/projects/{PROJECT_CODE}/workflow-definition?pageNo=1&pageSize=100",
-        f"/projects/{PROJECT_CODE}/process-definition?pageNo=1&pageSize=100",
+    """兼容 DS 3.3 workflow-definition 与 DS 3.2 process-definition 列表接口，并自动翻页"""
+    endpoint_templates = [
+        "/projects/{project_code}/workflow-definition?pageNo={page_no}&pageSize=100",
+        "/projects/{project_code}/process-definition?pageNo={page_no}&pageSize=100",
     ]
     last_msg = ""
-    for endpoint in endpoints:
-        success, data, msg = ds_api_get(endpoint)
-        if success:
-            return True, data, msg
-        last_msg = msg
+
+    for endpoint_template in endpoint_templates:
+        page_no = 1
+        total_pages = 1
+        merged_total_list = []
+
+        while page_no <= total_pages:
+            endpoint = endpoint_template.format(project_code=PROJECT_CODE, page_no=page_no)
+            success, data, msg = ds_api_get(endpoint)
+            if not success:
+                last_msg = msg
+                merged_total_list = []
+                break
+
+            merged_total_list.extend(data.get('totalList', []))
+            total_pages = data.get('totalPage') or 1
+            page_no += 1
+
+        if merged_total_list:
+            return True, {'totalList': merged_total_list}, ''
+
     return False, {}, last_msg
 
 
