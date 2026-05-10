@@ -193,6 +193,19 @@ Please prepare these values for the Indonesia environment:
    - `python3 dolphinscheduler/run_fuyan_workflows.py --help`
    - main repair flow in a controlled environment
 
+## Runtime Notes From 2026-05-10
+
+Two production behaviors were confirmed during the Indonesia rollout:
+
+1. DolphinScheduler may return a successful `start-process-instance` response before the new instance is visible from the detail API.
+   - The repair flow now keeps polling and falls back to the running-instance list before treating this as a real failure.
+   - If a report mentions query failure, first distinguish between "instance not yet visible" and a true API/config issue.
+
+2. Manual repair reruns must avoid overlapping with scheduled workflow execution.
+   - The repair flow now checks for existing running instances of the same workflow before starting a rerun.
+   - If a scheduled or manual instance is already running, the task is skipped with a clear conflict reason instead of forcing another start.
+   - When rolling out to another country, confirm the repair cron is staggered away from large scheduled workflow windows.
+
 ## Remaining Second-Round Work
 
 These scripts still need to be migrated in round two:

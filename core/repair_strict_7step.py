@@ -87,6 +87,40 @@ def get_workflow_definition_list():
     return False, {}, last_msg
 
 
+def get_schedule_map():
+    """获取当前项目的调度配置映射，用于识别带定时的父工作流"""
+    endpoint_templates = [
+        "/projects/{project_code}/schedules?pageNo={page_no}&pageSize=200",
+    ]
+    schedule_map = {}
+
+    for endpoint_template in endpoint_templates:
+        page_no = 1
+        total_pages = 1
+
+        while page_no <= total_pages:
+            endpoint = endpoint_template.format(project_code=PROJECT_CODE, page_no=page_no)
+            success, data, msg = ds_api_get(endpoint)
+            if not success:
+                break
+
+            total_list = data.get('totalList', [])
+            for item in total_list:
+                process_code = (
+                    item.get('processDefinitionCode')
+                    or item.get('workflowDefinitionCode')
+                    or item.get('definitionCode')
+                )
+                if process_code is None:
+                    continue
+                schedule_map[str(process_code)] = item
+
+            total_pages = data.get('totalPage') or 1
+            page_no += 1
+
+    return schedule_map
+
+
 def get_instance_detail(project_code, instance_id):
     """兼容 DS 3.3 workflow-instances 与 DS 3.2 process-instances 详情接口"""
     endpoints = [
@@ -119,6 +153,159 @@ def get_instance_from_list(project_code, instance_id):
             if str(item.get('id')) == instance_id_str:
                 return item
     return {}
+
+
+def parse_ds_datetime(value):
+    """兼容解析 DS 返回的常见时间格式"""
+    if not value:
+        return None
+
+    if hasattr(value, 'strftime'):
+        return value
+
+    text = str(value).strip()
+    patterns = (
+        '%Y-%m-%d %H:%M:%S',
+        '%Y-%m-%d %H:%M:%S.%f',
+        '%Y-%m-%dT%H:%M:%S',
+        '%Y-%m-%dT%H:%M:%S.%fZ',
+        '%Y-%m-%dT%H:%M:%S%z',
+    )
+    for pattern in patterns:
+        try:
+            return datetime.strptime(text, pattern)
+        except ValueError:
+            continue
+    return None
+
+
+def get_all_instances_from_lists(project_code, state_type='ALL'):
+    """从实例列表接口聚合所有可见实例，用于兼容不同 DS 版本/返回口径"""
+    endpoint_templates = [
+        "/projects/{project_code}/workflow-instances?pageNo={page_no}&pageSize=100&stateType={state_type}",
+        "/projects/{project_code}/process-instances?pageNo={page_no}&pageSize=100&stateType={state_type}",
+    ]
+    merged_items = []
+    seen_keys = set()
+
+    for endpoint_template in endpoint_templates:
+        page_no = 1
+        total_pages = 1
+
+        while page_no <= total_pages:
+            endpoint = endpoint_template.format(
+                project_code=project_code,
+                page_no=page_no,
+                state_type=state_type,
+            )
+            success, data, msg = ds_api_get(endpoint)
+            if not success:
+                break
+
+            for item in data.get('totalList', []):
+                key = str(item.get('id'))
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                merged_items.append(item)
+
+            total_pages = data.get('totalPage') or 1
+            page_no += 1
+
+    return merged_items
+
+
+def find_recent_instance_by_workflow(project_code, workflow_code, launched_at=None):
+    """当 instance_id 无法直接查询时，按工作流和启动时间窗口反查最近实例"""
+    workflow_code_str = str(workflow_code)
+    launched_at_dt = parse_ds_datetime(launched_at)
+    candidates = []
+
+    for item in get_all_instances_from_lists(project_code, state_type='ALL'):
+        item_workflow_code = (
+            item.get('processDefinitionCode')
+            or item.get('workflowDefinitionCode')
+            or item.get('definitionCode')
+        )
+        if str(item_workflow_code) != workflow_code_str:
+            continue
+
+        start_dt = parse_ds_datetime(item.get('startTime'))
+        if launched_at_dt and start_dt:
+            diff_seconds = abs((start_dt - launched_at_dt).total_seconds())
+            if diff_seconds > 600:
+                continue
+        candidates.append(item)
+
+    if not candidates:
+        return {}
+
+    candidates.sort(
+        key=lambda item: parse_ds_datetime(item.get('startTime')) or datetime.min,
+        reverse=True,
+    )
+    return candidates[0]
+
+
+def get_running_instances_by_workflow(project_code, workflow_code):
+    """查询指定工作流当前是否已有运行中的实例，用于避开调度执行窗口"""
+    endpoints = [
+        f"/projects/{project_code}/workflow-instances?pageNo=1&pageSize=100&stateType=RUNNING_EXECUTION",
+        f"/projects/{project_code}/process-instances?pageNo=1&pageSize=100&stateType=RUNNING_EXECUTION",
+    ]
+    workflow_code_str = str(workflow_code)
+
+    for endpoint in endpoints:
+        success, data, msg = ds_api_get(endpoint)
+        if not success:
+            continue
+        items = data.get('totalList', [])
+        matches = []
+        for item in items:
+            item_workflow_code = (
+                item.get('processDefinitionCode')
+                or item.get('workflowDefinitionCode')
+                or item.get('definitionCode')
+            )
+            if str(item_workflow_code) == workflow_code_str:
+                matches.append(item)
+        if matches:
+            return matches
+    return []
+
+
+def find_conflicting_running_instance(project_code, workflow_code):
+    """返回会与手动重跑冲突的运行中实例"""
+    running_instances = get_running_instances_by_workflow(project_code, workflow_code)
+    if not running_instances:
+        return None
+
+    for item in running_instances:
+        command_type = str(item.get('commandType') or '').upper()
+        if command_type == 'SCHEDULER':
+            return item
+    return running_instances[0]
+
+
+def build_conflicting_instance_error(conflict_instance):
+    """为运行冲突场景生成更清晰的人工处理说明"""
+    instance_id = conflict_instance.get('id', '未知')
+    command_type = conflict_instance.get('commandType') or 'UNKNOWN'
+    state = conflict_instance.get('state') or 'UNKNOWN'
+    return (
+        f"目标工作流已有运行中实例，跳过本次重跑以避开调度冲突 "
+        f"(实例ID: {instance_id}, 启动类型: {command_type}, 状态: {state})"
+    )
+
+
+def is_workflow_scheduled(workflow_code, schedule_map):
+    """判断工作流是否挂了定时调度"""
+    return str(workflow_code) in schedule_map
+
+
+def build_scheduled_parent_only_error(location):
+    workflow_name = location.get('workflow_name') or '未知工作流'
+    return f"仅匹配到带定时的父工作流，自动修复禁止直接启动该工作流，需改为命中无定时子工作流 ({workflow_name})"
 
 
 def get_fuyan_name(workflow):
@@ -445,6 +632,7 @@ def step2_find_locations(alerts):
     
     # 缓存所有工作流列表（只获取一次）
     all_workflows = None
+    schedule_map = None
     
     tasks = []
     found_count = 0
@@ -454,10 +642,16 @@ def step2_find_locations(alerts):
         log(f"🔍 {table}")
         
         location = None
+        scheduled_location = None
         # 先在优先工作流中搜索
         for wf_code, wf_name in priority_workflows:
             result = step2_search_in_workflow(wf_code, table)
             if result:
+                if schedule_map is None:
+                    schedule_map = get_schedule_map()
+                if is_workflow_scheduled(result['workflow_code'], schedule_map):
+                    scheduled_location = result
+                    continue
                 location = result
                 break
         
@@ -480,6 +674,12 @@ def step2_find_locations(alerts):
                 if wf_code not in [pw[0] for pw in priority_workflows]:
                     result = step2_search_in_workflow(wf_code, table)
                     if result:
+                        if schedule_map is None:
+                            schedule_map = get_schedule_map()
+                        if is_workflow_scheduled(result['workflow_code'], schedule_map):
+                            if scheduled_location is None:
+                                scheduled_location = result
+                            continue
                         location = result
                         break
         
@@ -497,6 +697,21 @@ def step2_find_locations(alerts):
             }
             log(f"  ✅ {location['workflow_name']} -> {location['task_name']}")
             found_count += 1
+        elif scheduled_location:
+            error_msg = build_scheduled_parent_only_error(scheduled_location)
+            task = {
+                'alert_id': alert['id'],
+                'table': table,
+                'dt': alert['dt'],
+                'diff': alert.get('diff'),
+                'workflow_code': '',
+                'workflow_name': scheduled_location['workflow_name'],
+                'task_code': '',
+                'task_name': scheduled_location.get('task_name', ''),
+                'task_flag': scheduled_location.get('task_flag', ''),
+                'error': error_msg,
+            }
+            log(f"  ⏭️ {error_msg}")
         else:
             task = {
                 'alert_id': alert['id'],
@@ -640,6 +855,15 @@ def step3_start_repair(tasks):
         log(f"\n[{i}/{len(tasks)}] {table}")
         log(f"  工作流: {task['workflow_name']}")
         log(f"  任务: {task['task_name']}")
+
+        conflict_instance = find_conflicting_running_instance(PROJECT_CODE, workflow_code)
+        if conflict_instance:
+            error_msg = build_conflicting_instance_error(conflict_instance)
+            log(f"  ⏭️ 跳过启动: {error_msg}")
+            task['status'] = 'failed'
+            task['error'] = error_msg
+            results.append(task)
+            continue
         
         # 启动修复
         data = {
@@ -669,9 +893,11 @@ def step3_start_repair(tasks):
             log(f"  ✅ 启动成功，实例ID: {instance_id}")
             task['status'] = 'success'
             task['instance_id'] = instance_id
+            task['launched_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             running_instances.append({
                 'table': table,
                 'instance_id': instance_id,
+                'workflow_code': workflow_code,
                 'task': task
             })
         else:
@@ -708,6 +934,7 @@ def step4_wait_and_check(running_instances, poll_interval=30, max_wait=1800):
     # 初始化失败计数
     for item in pending:
         item['fail_count'] = 0
+        item['first_seen_at'] = time.time()
     
     check_count = 0
     
@@ -723,18 +950,32 @@ def step4_wait_and_check(running_instances, poll_interval=30, max_wait=1800):
         for item in pending:
             table = item['table']
             instance_id = item['instance_id']
+            workflow_code = item.get('workflow_code') or item['task'].get('workflow_code')
             
             # 查询实例状态
             success, data, msg = get_instance_detail(PROJECT_CODE, instance_id)
-            if (not success or not data) and item['fail_count'] < 2:
+            if not success or not data:
                 fallback_data = get_instance_from_list(PROJECT_CODE, instance_id)
                 if fallback_data:
                     success = True
                     data = fallback_data
                     msg = ''
+                elif workflow_code:
+                    recent_instance = find_recent_instance_by_workflow(
+                        PROJECT_CODE,
+                        workflow_code,
+                        launched_at=item['task'].get('launched_at'),
+                    )
+                    if recent_instance:
+                        success = True
+                        data = recent_instance
+                        msg = ''
             
             if success and data:
                 state = data.get('state', 'UNKNOWN')
+                if data.get('id') is not None:
+                    item['instance_id'] = data.get('id')
+                    item['task']['instance_id'] = data.get('id')
                 
                 if state in ['SUCCESS', 'FINISHED']:
                     log(f"  ✅ {table}: 完成 ({state})")
@@ -756,7 +997,9 @@ def step4_wait_and_check(running_instances, poll_interval=30, max_wait=1800):
             else:
                 # 查询失败，增加失败计数
                 item['fail_count'] += 1
-                if item['fail_count'] >= 3:
+                instance_age = time.time() - item.get('first_seen_at', start_time)
+                # 刚启动后的短时间内，DS 详情接口可能还查不到实例，避免过早误判失败。
+                if item['fail_count'] >= 3 and instance_age >= 180:
                     log(f"  ❌ {table}: 查询失败超过3次，标记为失败 ({msg})")
                     item['task']['final_status'] = 'failed'
                     item['task']['error'] = f"查询失败: {msg}"
@@ -796,25 +1039,73 @@ def step4_wait_and_check(running_instances, poll_interval=30, max_wait=1800):
     return completed_tasks, failed_tasks
 
 
+def get_task_execution_key(task):
+    """为同一个子任务生成串行执行键，避免重复并发启动"""
+    workflow_code = task.get('workflow_code') or ''
+    task_code = task.get('task_code') or ''
+    return f"{workflow_code}::{task_code}"
+
+
+def split_ready_and_blocked_tasks(tasks, in_flight_keys):
+    """把可立即启动的任务与需排队等待的同子任务任务拆开"""
+    ready_tasks = []
+    blocked_tasks = []
+    seen_keys = set(in_flight_keys)
+
+    for task in tasks:
+        workflow_code = task.get('workflow_code')
+        task_code = task.get('task_code')
+
+        if not workflow_code or not task_code:
+            ready_tasks.append(task)
+            continue
+
+        execution_key = get_task_execution_key(task)
+        if execution_key in seen_keys:
+            blocked_tasks.append(task)
+            continue
+
+        ready_tasks.append(task)
+        seen_keys.add(execution_key)
+
+    return ready_tasks, blocked_tasks
+
+
 def execute_repairs_in_batches(tasks, max_parallel=5):
-    """分批执行修复任务，控制同时运行的实例数量"""
+    """分批执行修复任务，控制同时运行的实例数量，并让同一子任务串行排队"""
     if max_parallel <= 0:
         raise ValueError("max_parallel must be greater than 0")
 
     all_results = []
     all_completed_tasks = []
     all_failed_tasks = []
+    pending_queue = list(tasks)
+    in_flight_keys = set()
+    batch_index = 0
 
-    total_batches = (len(tasks) + max_parallel - 1) // max_parallel
+    while pending_queue:
+        ready_tasks, blocked_tasks = split_ready_and_blocked_tasks(pending_queue, in_flight_keys)
+        if not ready_tasks:
+            ready_tasks = [pending_queue[0]]
+            blocked_tasks = pending_queue[1:]
 
-    for batch_index, start in enumerate(range(0, len(tasks), max_parallel), 1):
-        batch_tasks = tasks[start:start + max_parallel]
+        batch_tasks = ready_tasks[:max_parallel]
+        remaining_ready = ready_tasks[max_parallel:]
+        pending_queue = remaining_ready + blocked_tasks
+        batch_index += 1
+        batch_task_keys = {
+            get_task_execution_key(task)
+            for task in batch_tasks
+            if task.get('workflow_code') and task.get('task_code')
+        }
         log("\n" + "=" * 70)
-        log(f"【批次 {batch_index}/{total_batches}】执行 {len(batch_tasks)} 个修复任务")
+        log(f"【批次 {batch_index}】执行 {len(batch_tasks)} 个修复任务")
         log("=" * 70)
 
         batch_results, running_instances = step3_start_repair(batch_tasks)
+        in_flight_keys.update(batch_task_keys)
         completed_tasks, failed_tasks = step4_wait_and_check(running_instances)
+        in_flight_keys.difference_update(batch_task_keys)
 
         all_results.extend(batch_results)
         all_completed_tasks.extend(completed_tasks)

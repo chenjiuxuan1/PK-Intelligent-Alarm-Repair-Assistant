@@ -182,6 +182,177 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(results[0]["instance_id"], 12345)
         self.assertEqual(running_instances[0]["instance_id"], 12345)
 
+    def test_step3_start_repair_skips_when_workflow_has_running_instance(self):
+        module = load_module()
+        tasks = [
+            {
+                "table": "dwd_fox_mission_log",
+                "dt": "2026-04-29",
+                "workflow_code": "wf-1",
+                "workflow_name": "DWD",
+                "task_code": "task-1",
+                "task_name": "dwd_fox_mission_log",
+            }
+        ]
+
+        with mock.patch.object(
+            module,
+            "find_conflicting_running_instance",
+            return_value={"id": 999, "commandType": "SCHEDULER", "state": "RUNNING_EXECUTION"},
+        ), mock.patch.object(module, "ds_api_post") as mocked_post, mock.patch.object(module, "log"), mock.patch(
+            "time.sleep"
+        ):
+            results, running_instances = module.step3_start_repair(tasks)
+
+        mocked_post.assert_not_called()
+        self.assertEqual(results[0]["status"], "failed")
+        self.assertIn("运行中实例", results[0]["error"])
+        self.assertIn("999", results[0]["error"])
+        self.assertEqual(running_instances, [])
+
+    def test_execute_repairs_in_batches_serializes_same_child_task(self):
+        module = load_module()
+        tasks = [
+            {
+                "table": "ods_cash_model_model",
+                "dt": "2026-05-10",
+                "workflow_code": "wf-1",
+                "workflow_name": "ODS_CASH_MODEL",
+                "task_code": "task-1",
+                "task_name": "ods_cash_model_model",
+            },
+            {
+                "table": "ods_cash_model_model_retry",
+                "dt": "2026-05-11",
+                "workflow_code": "wf-1",
+                "workflow_name": "ODS_CASH_MODEL",
+                "task_code": "task-1",
+                "task_name": "ods_cash_model_model",
+            },
+        ]
+        step3_batches = []
+        waited_instances = []
+
+        def fake_step3(batch_tasks):
+            step3_batches.append([task["dt"] for task in batch_tasks])
+            running = []
+            for index, task in enumerate(batch_tasks, 1):
+                copied = dict(task)
+                copied["instance_id"] = 2000 + len(step3_batches) * 10 + index
+                copied["status"] = "success"
+                running.append(
+                    {
+                        "table": copied["table"],
+                        "instance_id": copied["instance_id"],
+                        "task": copied,
+                    }
+                )
+            return [item["task"] for item in running], running
+
+        def fake_wait(running_instances, poll_interval=30, max_wait=1800):
+            waited_instances.append([item["instance_id"] for item in running_instances])
+            completed = []
+            for item in running_instances:
+                task = dict(item["task"])
+                task["final_status"] = "success"
+                completed.append(task)
+            return completed, []
+
+        with mock.patch.object(module, "step3_start_repair", side_effect=fake_step3), mock.patch.object(
+            module, "step4_wait_and_check", side_effect=fake_wait
+        ), mock.patch.object(module, "log"):
+            results, completed_tasks, failed_tasks = module.execute_repairs_in_batches(tasks, max_parallel=5)
+
+        self.assertEqual(step3_batches, [["2026-05-10"], ["2026-05-11"]])
+        self.assertEqual(waited_instances, [[2011], [2021]])
+        self.assertEqual(len(results), 2)
+        self.assertEqual(len(completed_tasks), 2)
+        self.assertEqual(failed_tasks, [])
+
+    def test_step4_wait_and_check_does_not_fail_when_detail_query_is_temporarily_unavailable(self):
+        module = load_module()
+        running_instances = [
+            {
+                "table": "dwd_fox_mission_log",
+                "instance_id": 12345,
+                "task": {
+                    "table": "dwd_fox_mission_log",
+                    "instance_id": 12345,
+                    "workflow_code": "wf-1",
+                },
+                "workflow_code": "wf-1",
+            }
+        ]
+        list_side_effects = [
+            {},
+            {},
+            {"id": 12345, "state": "SUCCESS", "endTime": "2026-05-10 09:00:00"},
+        ]
+
+        with mock.patch.object(
+            module,
+            "get_instance_detail",
+            return_value=(False, {}, "query process instance by id error"),
+        ), mock.patch.object(
+            module,
+            "get_instance_from_list",
+            side_effect=list_side_effects,
+        ), mock.patch.object(module, "log"), mock.patch("time.sleep"):
+            completed, failed = module.step4_wait_and_check(
+                running_instances,
+                poll_interval=1,
+                max_wait=10,
+            )
+
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0]["final_status"], "success")
+        self.assertEqual(completed[0]["end_time"], "2026-05-10 09:00:00")
+        self.assertEqual(failed, [])
+
+    def test_step4_wait_and_check_can_match_recent_instance_when_returned_id_is_not_queryable(self):
+        module = load_module()
+        running_instances = [
+            {
+                "table": "ods_app_product",
+                "instance_id": 11111,
+                "workflow_code": "wf-app",
+                "task": {
+                    "table": "ods_app_product",
+                    "instance_id": 11111,
+                    "workflow_code": "wf-app",
+                },
+                "launched_at": "2026-05-10 10:33:08",
+            }
+        ]
+
+        with mock.patch.object(
+            module,
+            "get_instance_detail",
+            return_value=(False, {}, "query process instance by id error"),
+        ), mock.patch.object(
+            module,
+            "get_instance_from_list",
+            return_value={},
+        ), mock.patch.object(
+            module,
+            "find_recent_instance_by_workflow",
+            return_value={
+                "id": 22222,
+                "state": "SUCCESS",
+                "endTime": "2026-05-10 10:34:02",
+            },
+        ), mock.patch.object(module, "log"), mock.patch("time.sleep"):
+            completed, failed = module.step4_wait_and_check(
+                running_instances,
+                poll_interval=1,
+                max_wait=10,
+            )
+
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0]["instance_id"], 22222)
+        self.assertEqual(completed[0]["final_status"], "success")
+        self.assertEqual(failed, [])
+
     def test_step2_find_locations_falls_back_to_process_definition_list_for_ds32(self):
         module = load_module()
 
@@ -248,6 +419,76 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(tasks[0]["workflow_code"], "wf-page2")
         self.assertEqual(tasks[0]["task_code"], "task-b")
         self.assertEqual(tasks[0]["workflow_name"], "PAGE2")
+
+    def test_step2_find_locations_prefers_unscheduled_child_workflow_over_scheduled_parent(self):
+        module = load_module()
+        alerts = [{"id": 1, "table": "ods_cash_model_model", "dt": "2026-05-10", "diff": 1}]
+
+        def fake_ds_api_get(endpoint):
+            if endpoint.endswith("/workflow-definition/158514956979200"):
+                return True, {
+                    "processDefinition": {"name": "印尼-数仓工作流（1/2H）"},
+                    "taskDefinitionList": [{"code": "task-parent", "name": "ods_cash_model_model"}],
+                }, ""
+            if endpoint.endswith("/workflow-definition/child-free"):
+                return True, {
+                    "processDefinition": {"name": "ODS_CASH_MODEL"},
+                    "taskDefinitionList": [{"code": "task-child", "name": "ods_cash_model_model"}],
+                }, ""
+            if endpoint.endswith("/workflow-definition?pageNo=1&pageSize=100"):
+                return True, {
+                    "totalList": [{"code": "child-free"}],
+                    "totalPage": 1,
+                }, ""
+            if endpoint.endswith("/schedules?pageNo=1&pageSize=200"):
+                return True, {
+                    "totalList": [
+                        {
+                            "processDefinitionCode": "158514956979200",
+                            "releaseState": "ONLINE",
+                        }
+                    ],
+                    "totalPage": 1,
+                }, ""
+            return False, {}, f"unexpected endpoint: {endpoint}"
+
+        with mock.patch.object(module, "ds_api_get", side_effect=fake_ds_api_get):
+            tasks = module.step2_find_locations(alerts)
+
+        self.assertEqual(tasks[0]["workflow_code"], "child-free")
+        self.assertEqual(tasks[0]["task_code"], "task-child")
+        self.assertEqual(tasks[0]["workflow_name"], "ODS_CASH_MODEL")
+
+    def test_step2_find_locations_marks_scheduled_parent_only_match_as_manual_review(self):
+        module = load_module()
+        alerts = [{"id": 1, "table": "ods_cash_model_model", "dt": "2026-05-10", "diff": 1}]
+
+        def fake_ds_api_get(endpoint):
+            if endpoint.endswith("/workflow-definition/158514956979200"):
+                return True, {
+                    "processDefinition": {"name": "印尼-数仓工作流（1/2H）"},
+                    "taskDefinitionList": [{"code": "task-parent", "name": "ods_cash_model_model"}],
+                }, ""
+            if endpoint.endswith("/workflow-definition?pageNo=1&pageSize=100"):
+                return True, {"totalList": [], "totalPage": 1}, ""
+            if endpoint.endswith("/schedules?pageNo=1&pageSize=200"):
+                return True, {
+                    "totalList": [
+                        {
+                            "processDefinitionCode": "158514956979200",
+                            "releaseState": "ONLINE",
+                        }
+                    ],
+                    "totalPage": 1,
+                }, ""
+            return False, {}, f"unexpected endpoint: {endpoint}"
+
+        with mock.patch.object(module, "ds_api_get", side_effect=fake_ds_api_get):
+            tasks = module.step2_find_locations(alerts)
+
+        self.assertEqual(tasks[0]["workflow_code"], "")
+        self.assertIn("带定时", tasks[0]["error"])
+        self.assertIn("1/2H", tasks[0]["error"])
 
     def test_step2_search_in_workflow_marks_forbidden_task_for_manual_review(self):
         module = load_module()
