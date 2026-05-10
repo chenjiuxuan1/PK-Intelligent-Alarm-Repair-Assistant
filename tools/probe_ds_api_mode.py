@@ -9,6 +9,7 @@ Run this on the server that can reach the target DS cluster.
 import json
 import sys
 from pathlib import Path
+import argparse
 from urllib.parse import urlencode
 import urllib.request
 
@@ -108,6 +109,60 @@ def probe_instance_style():
     return results
 
 
+def probe_instance_detail(instance_id):
+    detail_results = []
+    for style in ("process-instances", "workflow-instances"):
+        endpoint = f"/projects/{PROJECT_CODE}/{style}/{instance_id}"
+        success, data, msg = ds_api_get(endpoint)
+        detail_results.append(
+            {
+                "style": style,
+                "endpoint": endpoint,
+                "success": success,
+                "msg": msg,
+                "state": data.get("state") if isinstance(data, dict) else None,
+                "definition_code": (
+                    data.get("processDefinitionCode")
+                    or data.get("workflowDefinitionCode")
+                    or data.get("definitionCode")
+                ) if isinstance(data, dict) else None,
+                "start_time": data.get("startTime") if isinstance(data, dict) else None,
+            }
+        )
+
+    list_matches = []
+    for state_type in ("RUNNING_EXECUTION", "SUCCESS", "FAILURE", "READY_STOP", "ALL", None):
+        suffix = "?pageNo=1&pageSize=20"
+        if state_type:
+            suffix += f"&stateType={state_type}"
+        endpoint = f"/projects/{PROJECT_CODE}/process-instances{suffix}"
+        success, data, msg = ds_api_get(endpoint)
+        total_list = data.get("totalList", []) if isinstance(data, dict) else []
+        match = next((item for item in total_list if str(item.get("id")) == str(instance_id)), None)
+        list_matches.append(
+            {
+                "state_type": state_type or "NONE",
+                "endpoint": endpoint,
+                "success": success,
+                "msg": msg,
+                "visible_count": len(total_list),
+                "matched": bool(match),
+                "matched_state": match.get("state") if match else None,
+                "matched_definition_code": (
+                    match.get("processDefinitionCode")
+                    or match.get("workflowDefinitionCode")
+                    or match.get("definitionCode")
+                ) if match else None,
+            }
+        )
+
+    return {
+        "instance_id": instance_id,
+        "detail_results": detail_results,
+        "list_matches": list_matches,
+    }
+
+
 def probe_start_modes():
     definition_results = probe_definition_style()
     candidate_code = None
@@ -159,6 +214,13 @@ def probe_start_modes():
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Probe DolphinScheduler API mode")
+    parser.add_argument(
+        "--instance-id",
+        help="Optional: probe detail and list visibility for a known process instance id",
+    )
+    args = parser.parse_args()
+
     report = {
         "base_url": DS_BASE,
         "project_code": PROJECT_CODE,
@@ -166,6 +228,8 @@ def main():
         "instance_style_probe": probe_instance_style(),
         "start_mode_probe": probe_start_modes(),
     }
+    if args.instance_id:
+        report["instance_detail_probe"] = probe_instance_detail(args.instance_id)
     print(json.dumps(report, indent=2, ensure_ascii=False))
 
 
