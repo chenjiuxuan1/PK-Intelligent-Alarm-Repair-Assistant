@@ -519,6 +519,73 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(completed[0]["final_status"], "success")
         self.assertEqual(failed, [])
 
+    def test_step4_wait_and_check_discovers_real_process_instance_before_detail_query(self):
+        module = load_module()
+        module.DS_API_MODE = "process_v2"
+        module.DS_INSTANCE_ENDPOINT_STYLE = "process-instances"
+        running_instances = [
+            {
+                "table": "ods_app_product",
+                "instance_id": 99999,
+                "start_response_id": 99999,
+                "resolved_instance_id": None,
+                "workflow_code": "wf-app",
+                "task": {
+                    "table": "ods_app_product",
+                    "instance_id": 99999,
+                    "workflow_code": "wf-app",
+                    "launched_at": "2026-05-10 10:33:08",
+                },
+            }
+        ]
+        detail_calls = []
+
+        def fake_get_instance_detail(project_code, instance_id):
+            detail_calls.append(instance_id)
+            if instance_id == 22222:
+                return True, {"id": 22222, "state": "SUCCESS", "endTime": "2026-05-10 10:34:02"}, ""
+            return False, {}, "query process instance by id error"
+
+        with mock.patch.object(
+            module,
+            "find_recent_instance_by_workflow",
+            return_value={"id": 22222, "state": "RUNNING_EXECUTION", "startTime": "2026-05-10 10:33:09"},
+        ), mock.patch.object(
+            module,
+            "get_instance_detail",
+            side_effect=fake_get_instance_detail,
+        ), mock.patch.object(
+            module,
+            "get_instance_from_list",
+            return_value={},
+        ), mock.patch.object(module, "log"), mock.patch("time.sleep"):
+            completed, failed = module.step4_wait_and_check(
+                running_instances,
+                poll_interval=1,
+                max_wait=10,
+            )
+
+        self.assertEqual(detail_calls[0], 22222)
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0]["instance_id"], 22222)
+        self.assertEqual(failed, [])
+
+    def test_get_instance_from_list_avoids_all_state_for_process_mode(self):
+        module = load_module()
+        module.DS_API_MODE = "process_v2"
+        module.DS_INSTANCE_ENDPOINT_STYLE = "process-instances"
+        seen_state_types = []
+
+        def fake_get_all_instances_from_lists(project_code, state_type='ALL'):
+            seen_state_types.append(state_type)
+            return []
+
+        with mock.patch.object(module, "get_all_instances_from_lists", side_effect=fake_get_all_instances_from_lists):
+            result = module.get_instance_from_list("default-project", 12345)
+
+        self.assertEqual(result, {})
+        self.assertNotIn("ALL", seen_state_types)
+
     def test_get_instance_detail_uses_configured_process_instance_style(self):
         module = load_module()
         module.DS_INSTANCE_ENDPOINT_STYLE = "process-instances"

@@ -111,6 +111,19 @@ def _get_start_attempts():
     ]
 
 
+def _get_instance_state_types_for_search(include_all=False):
+    """根据接口风格选择可查询的状态枚举，避开已知不兼容口径。"""
+    if DS_INSTANCE_ENDPOINT_STYLE == 'process-instances' or DS_API_MODE == 'process_v2':
+        state_types = ['RUNNING_EXECUTION', 'SUCCESS', 'FAILURE', 'READY_STOP', None]
+    else:
+        state_types = ['RUNNING_EXECUTION', 'READY_STOP', 'FAILURE', 'SUCCESS', 'FINISHED', None]
+
+    if include_all:
+        insert_at = max(len(state_types) - 1, 0)
+        state_types.insert(insert_at, 'ALL')
+    return tuple(state_types)
+
+
 def get_workflow_definition_detail(workflow_code):
     """兼容 DS 3.3 workflow-definition 与 DS 3.2 process-definition 详情接口"""
     endpoints = _get_definition_detail_endpoints(PROJECT_CODE, workflow_code)
@@ -210,7 +223,7 @@ def _build_instance_list_endpoints(project_code, state_type=None, page_no=1, pag
 def get_instance_from_list(project_code, instance_id):
     """详情接口失败时，回退到实例列表中按 ID 查状态，避免误判已启动实例"""
     instance_id_str = str(instance_id)
-    for state_type in ('RUNNING_EXECUTION', 'READY_STOP', 'FAILURE', 'SUCCESS', 'FINISHED', 'ALL', None):
+    for state_type in _get_instance_state_types_for_search(include_all=False):
         items = get_all_instances_from_lists(project_code, state_type=state_type)
         debug_log(
             f"列表回查实例ID {instance_id} 使用 stateType={state_type or 'NONE'}，可见实例 {len(items)} 个"
@@ -316,7 +329,7 @@ def get_all_instances_from_lists(project_code, state_type='ALL'):
 def find_recent_instance_by_workflow(project_code, workflow_code, launched_at=None, state_types=None):
     """当 instance_id 无法直接查询时，按工作流和启动时间窗口反查最近实例"""
     if state_types is None:
-        state_types = ('RUNNING_EXECUTION', 'ALL')
+        state_types = _get_instance_state_types_for_search(include_all=False)
 
     workflow_code_str = str(workflow_code)
     launched_at_dt = parse_ds_datetime(launched_at)
@@ -373,7 +386,7 @@ def collect_instance_query_diagnostics(project_code, instance_id, workflow_code=
         )
 
     list_results = []
-    for state_type in ('RUNNING_EXECUTION', 'READY_STOP', 'FAILURE', 'SUCCESS', 'FINISHED', 'ALL', None):
+    for state_type in _get_instance_state_types_for_search(include_all=True):
         items = get_all_instances_from_lists(project_code, state_type=state_type)
         matched = next((item for item in items if str(item.get('id')) == str(instance_id)), None)
         list_results.append(
@@ -1078,11 +1091,14 @@ def step3_start_repair(tasks):
             )
             log(f"  ✅ 启动成功，实例ID: {instance_id}")
             task['status'] = 'success'
+            task['start_response_id'] = instance_id
             task['instance_id'] = instance_id
             task['launched_at'] = launched_at
             running_instances.append({
                 'table': table,
                 'instance_id': instance_id,
+                'start_response_id': instance_id,
+                'resolved_instance_id': None,
                 'workflow_code': workflow_code,
                 'task': task
             })
@@ -1135,8 +1151,28 @@ def step4_wait_and_check(running_instances, poll_interval=30, max_wait=1800):
         
         for item in pending:
             table = item['table']
-            instance_id = item['instance_id']
+            instance_id = item.get('resolved_instance_id') or item['instance_id']
             workflow_code = item.get('workflow_code') or item['task'].get('workflow_code')
+
+            # 对印尼这类 process-instances 风格集群，start-process-instance 返回值可能只是启动回执，
+            # 需要先从实例列表里按工作流 code + 启动时间找到真实实例，再进入详情/状态轮询。
+            discovered_instance = {}
+            if not item.get('resolved_instance_id') and workflow_code:
+                discovered_instance = find_recent_instance_by_workflow(
+                    PROJECT_CODE,
+                    workflow_code,
+                    launched_at=item['task'].get('launched_at'),
+                )
+                if discovered_instance.get('id') is not None:
+                    resolved_instance_id = discovered_instance.get('id')
+                    item['resolved_instance_id'] = resolved_instance_id
+                    item['instance_id'] = resolved_instance_id
+                    item['task']['instance_id'] = resolved_instance_id
+                    debug_log(
+                        f"发现真实实例 table={table} start_response_id={item.get('start_response_id')} "
+                        f"resolved_instance_id={resolved_instance_id}"
+                    )
+                    instance_id = resolved_instance_id
             
             # 查询实例状态
             success, data, msg = get_instance_detail(PROJECT_CODE, instance_id)
@@ -1146,6 +1182,10 @@ def step4_wait_and_check(running_instances, poll_interval=30, max_wait=1800):
                     success = True
                     data = fallback_data
                     msg = ''
+                elif discovered_instance:
+                    success = True
+                    data = discovered_instance
+                    msg = ''
                 elif workflow_code:
                     recent_instance = find_recent_instance_by_workflow(
                         PROJECT_CODE,
@@ -1153,6 +1193,10 @@ def step4_wait_and_check(running_instances, poll_interval=30, max_wait=1800):
                         launched_at=item['task'].get('launched_at'),
                     )
                     if recent_instance:
+                        if recent_instance.get('id') is not None:
+                            item['resolved_instance_id'] = recent_instance.get('id')
+                            item['instance_id'] = recent_instance.get('id')
+                            item['task']['instance_id'] = recent_instance.get('id')
                         success = True
                         data = recent_instance
                         msg = ''
