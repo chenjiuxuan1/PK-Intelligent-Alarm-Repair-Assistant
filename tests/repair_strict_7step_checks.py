@@ -269,6 +269,102 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(len(completed_tasks), 2)
         self.assertEqual(failed_tasks, [])
 
+    def test_execute_repairs_in_batches_does_not_block_on_step4_between_batches(self):
+        module = load_module()
+        tasks = [
+            {
+                "table": "table_a",
+                "dt": "2026-05-10",
+                "workflow_code": "wf-a",
+                "workflow_name": "WF_A",
+                "task_code": "task-a",
+                "task_name": "task_a",
+            },
+            {
+                "table": "table_b",
+                "dt": "2026-05-10",
+                "workflow_code": "wf-b",
+                "workflow_name": "WF_B",
+                "task_code": "task-b",
+                "task_name": "task_b",
+            },
+            {
+                "table": "table_c",
+                "dt": "2026-05-10",
+                "workflow_code": "wf-c",
+                "workflow_name": "WF_C",
+                "task_code": "task-c",
+                "task_name": "task_c",
+            },
+        ]
+        step3_batches = []
+        step4_calls = []
+
+        def fake_step3(batch_tasks):
+            step3_batches.append([task["table"] for task in batch_tasks])
+            results = []
+            running_instances = []
+            for index, task in enumerate(batch_tasks, 1):
+                copied = dict(task)
+                copied["status"] = "success"
+                copied["instance_id"] = 3000 + index + len(step3_batches) * 10
+                copied["launched_at"] = "2026-05-10 10:00:00"
+                results.append(copied)
+                running_instances.append(
+                    {
+                        "table": copied["table"],
+                        "instance_id": copied["instance_id"],
+                        "workflow_code": copied["workflow_code"],
+                        "task": copied,
+                    }
+                )
+            return results, running_instances
+
+        def fake_step4(running_instances, poll_interval=30, max_wait=1800):
+            step4_calls.append([item["table"] for item in running_instances])
+            return [], [dict(item["task"], final_status="failed", error="query failed") for item in running_instances]
+
+        with mock.patch.object(module, "step3_start_repair", side_effect=fake_step3), mock.patch.object(
+            module, "step4_wait_and_check", side_effect=fake_step4
+        ), mock.patch.object(module, "log"):
+            results, completed_tasks, failed_tasks = module.execute_repairs_in_batches(tasks, max_parallel=2)
+
+        self.assertEqual(step3_batches, [["table_a", "table_b"], ["table_c"]])
+        self.assertEqual(step4_calls, [["table_a", "table_b"], ["table_c"]])
+        self.assertEqual(len(results), 3)
+        self.assertEqual(len(completed_tasks), 3)
+        self.assertEqual(len(failed_tasks), 3)
+        self.assertTrue(all(item["final_status"] == "failed" for item in failed_tasks))
+
+    def test_main_starts_fuyan_when_repairs_were_launched_even_if_step4_failed(self):
+        module = load_module()
+
+        launched_results = [
+            {"table": "table_a", "status": "success", "instance_id": 111, "workflow_code": "wf-a", "task_code": "task-a"}
+        ]
+        launched_tasks = [
+            {"table": "table_a", "status": "success", "instance_id": 111, "workflow_code": "wf-a", "task_code": "task-a"}
+        ]
+        failed_tasks = [
+            {"table": "table_a", "final_status": "failed", "error": "query process instance by id error"}
+        ]
+
+        with mock.patch.object(module, "step1_scan_alerts", return_value=[{"table": "table_a", "dt": "2026-05-10"}]), \
+            mock.patch.object(module, "step2_find_locations", return_value=[{"table": "table_a", "dt": "2026-05-10"}]), \
+            mock.patch.object(module, "load_manual_review_state", return_value={}), \
+            mock.patch.object(module, "apply_repair_strategy", return_value=([{"table": "table_a", "dt": "2026-05-10"}], [])), \
+            mock.patch.object(module, "execute_repairs_in_batches", return_value=(launched_results, launched_tasks, failed_tasks)), \
+            mock.patch.object(module, "record_redundant_retry_attempt"), \
+            mock.patch.object(module, "record_manual_review_tasks"), \
+            mock.patch.object(module, "save_manual_review_state"), \
+            mock.patch.object(module, "step5_execute_fuyan", return_value=[{"name": "fuyan", "status": "success", "id": 1}]) as mocked_fuyan, \
+            mock.patch.object(module, "evaluate_repair_outcome", return_value=({"initial_alert_count": 1, "resolved_count": 0, "remaining_count": 1, "manual_review_count": 1, "rerun_tasks": [], "resolved_tasks": [], "remaining_tasks": [], "post_fuyan_remaining_tables": set()}, [])), \
+            mock.patch.object(module, "step6_save_report"), \
+            mock.patch.object(module, "log"):
+            module.main()
+
+        mocked_fuyan.assert_called_once()
+
     def test_step4_wait_and_check_does_not_fail_when_detail_query_is_temporarily_unavailable(self):
         module = load_module()
         running_instances = [

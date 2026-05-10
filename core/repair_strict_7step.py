@@ -1077,7 +1077,7 @@ def execute_repairs_in_batches(tasks, max_parallel=5):
         raise ValueError("max_parallel must be greater than 0")
 
     all_results = []
-    all_completed_tasks = []
+    all_launched_tasks = []
     all_failed_tasks = []
     pending_queue = list(tasks)
     in_flight_keys = set()
@@ -1103,15 +1103,16 @@ def execute_repairs_in_batches(tasks, max_parallel=5):
         log("=" * 70)
 
         batch_results, running_instances = step3_start_repair(batch_tasks)
+        launched_tasks = [task for task in batch_results if task.get('status') == 'success']
         in_flight_keys.update(batch_task_keys)
-        completed_tasks, failed_tasks = step4_wait_and_check(running_instances)
+        _, failed_tasks = step4_wait_and_check(running_instances)
         in_flight_keys.difference_update(batch_task_keys)
 
         all_results.extend(batch_results)
-        all_completed_tasks.extend(completed_tasks)
+        all_launched_tasks.extend(launched_tasks)
         all_failed_tasks.extend(failed_tasks)
 
-    return all_results, all_completed_tasks, all_failed_tasks
+    return all_results, all_launched_tasks, all_failed_tasks
 
 
 def step5_execute_fuyan(completed_tasks, failed_tasks, alerts):
@@ -1506,10 +1507,10 @@ def main():
     strategy_state = load_manual_review_state()
     runnable_tasks, manual_review_tasks = apply_repair_strategy(tasks, strategy_state)
     
-    # 步骤3-4: 分批启动修复并动态监控（最多并行5个）
-    results, completed_tasks, failed_tasks = execute_repairs_in_batches(runnable_tasks, max_parallel=5)
+    # 步骤3-4: 分批启动修复并采集状态（最多并行5个）
+    results, launched_tasks, failed_tasks = execute_repairs_in_batches(runnable_tasks, max_parallel=5)
 
-    record_redundant_retry_attempt(strategy_state, completed_tasks)
+    record_redundant_retry_attempt(strategy_state, launched_tasks)
     record_manual_review_tasks(strategy_state, manual_review_tasks)
     save_manual_review_state(strategy_state)
 
@@ -1520,23 +1521,23 @@ def main():
 
     results.extend(manual_review_tasks)
 
-    if completed_tasks:
+    if launched_tasks:
         # 步骤5: 执行复验
-        fuyan_results = step5_execute_fuyan(completed_tasks, failed_tasks, alerts)
+        fuyan_results = step5_execute_fuyan(launched_tasks, failed_tasks, alerts)
 
         summary, final_fuyan_results = evaluate_repair_outcome(
             alerts=alerts,
-            completed_tasks=completed_tasks,
+            completed_tasks=launched_tasks,
             failed_tasks=failed_tasks,
             manual_review_tasks=manual_review_tasks,
             fuyan_results=fuyan_results,
         )
     else:
-        log("\n⚠️ 本次没有成功启动并完成的修复任务，跳过复验和复验回查")
+        log("\n⚠️ 本次没有成功发起的修复任务，跳过复验和复验回查")
         remaining_tables = get_remaining_alert_tables()
         summary = summarize_repair_outcome(
             alerts=alerts,
-            completed_tasks=completed_tasks,
+            completed_tasks=launched_tasks,
             failed_tasks=failed_tasks,
             manual_review_tasks=manual_review_tasks,
             remaining_tables=remaining_tables,
@@ -1546,7 +1547,7 @@ def main():
     # 步骤6: 保存记录并发送TV报告
     step6_save_report(
         results,
-        completed_tasks,
+        launched_tasks,
         failed_tasks,
         final_fuyan_results,
         summary,
