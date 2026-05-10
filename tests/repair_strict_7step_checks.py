@@ -269,7 +269,7 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(len(completed_tasks), 2)
         self.assertEqual(failed_tasks, [])
 
-    def test_execute_repairs_in_batches_does_not_block_on_step4_between_batches(self):
+    def test_execute_repairs_in_batches_does_not_skip_step4_between_batches(self):
         module = load_module()
         tasks = [
             {
@@ -332,19 +332,17 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(step3_batches, [["table_a", "table_b"], ["table_c"]])
         self.assertEqual(step4_calls, [["table_a", "table_b"], ["table_c"]])
         self.assertEqual(len(results), 3)
-        self.assertEqual(len(completed_tasks), 3)
+        self.assertEqual(completed_tasks, [])
         self.assertEqual(len(failed_tasks), 3)
         self.assertTrue(all(item["final_status"] == "failed" for item in failed_tasks))
 
-    def test_main_starts_fuyan_when_repairs_were_launched_even_if_step4_failed(self):
+    def test_main_skips_fuyan_when_repairs_were_launched_but_not_completed(self):
         module = load_module()
 
         launched_results = [
             {"table": "table_a", "status": "success", "instance_id": 111, "workflow_code": "wf-a", "task_code": "task-a"}
         ]
-        launched_tasks = [
-            {"table": "table_a", "status": "success", "instance_id": 111, "workflow_code": "wf-a", "task_code": "task-a"}
-        ]
+        completed_tasks = []
         failed_tasks = [
             {"table": "table_a", "final_status": "failed", "error": "query process instance by id error"}
         ]
@@ -353,17 +351,18 @@ class RepairStrict7StepTests(unittest.TestCase):
             mock.patch.object(module, "step2_find_locations", return_value=[{"table": "table_a", "dt": "2026-05-10"}]), \
             mock.patch.object(module, "load_manual_review_state", return_value={}), \
             mock.patch.object(module, "apply_repair_strategy", return_value=([{"table": "table_a", "dt": "2026-05-10"}], [])), \
-            mock.patch.object(module, "execute_repairs_in_batches", return_value=(launched_results, launched_tasks, failed_tasks)), \
+            mock.patch.object(module, "execute_repairs_in_batches", return_value=(launched_results, completed_tasks, failed_tasks)), \
             mock.patch.object(module, "record_redundant_retry_attempt"), \
             mock.patch.object(module, "record_manual_review_tasks"), \
             mock.patch.object(module, "save_manual_review_state"), \
             mock.patch.object(module, "step5_execute_fuyan", return_value=[{"name": "fuyan", "status": "success", "id": 1}]) as mocked_fuyan, \
             mock.patch.object(module, "evaluate_repair_outcome", return_value=({"initial_alert_count": 1, "resolved_count": 0, "remaining_count": 1, "manual_review_count": 1, "rerun_tasks": [], "resolved_tasks": [], "remaining_tasks": [], "post_fuyan_remaining_tables": set()}, [])), \
+            mock.patch.object(module, "get_remaining_alert_tables", return_value=set()), \
             mock.patch.object(module, "step6_save_report"), \
             mock.patch.object(module, "log"):
             module.main()
 
-        mocked_fuyan.assert_called_once()
+        mocked_fuyan.assert_not_called()
 
     def test_step4_wait_and_check_does_not_fail_when_detail_query_is_temporarily_unavailable(self):
         module = load_module()
@@ -448,6 +447,29 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(completed[0]["instance_id"], 22222)
         self.assertEqual(completed[0]["final_status"], "success")
         self.assertEqual(failed, [])
+
+    def test_step3_start_repair_replaces_unqueryable_returned_id_with_recent_real_instance_id(self):
+        module = load_module()
+        tasks = [
+            {
+                "table": "ods_app_product",
+                "dt": "2026-05-10",
+                "workflow_code": "wf-app",
+                "workflow_name": "ODS_APP_COCONUT_FULL",
+                "task_code": "task-app",
+                "task_name": "ods_app_product",
+            }
+        ]
+
+        with mock.patch.object(module, "find_conflicting_running_instance", return_value=None), \
+            mock.patch.object(module, "ds_api_post", return_value=(True, {"data": [11111]}, "")), \
+            mock.patch.object(module, "resolve_started_instance", return_value={"id": 22222, "state": "RUNNING_EXECUTION"}), \
+            mock.patch.object(module, "log"), \
+            mock.patch("time.sleep"):
+            results, running_instances = module.step3_start_repair(tasks)
+
+        self.assertEqual(results[0]["instance_id"], 22222)
+        self.assertEqual(running_instances[0]["instance_id"], 22222)
 
     def test_step2_find_locations_falls_back_to_process_definition_list_for_ds32(self):
         module = load_module()
