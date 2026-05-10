@@ -48,6 +48,7 @@ class CountryConfigTests(unittest.TestCase):
             "DS_START_CODE_FIELD": "processDefinitionCode",
             "DS_DEFINITION_ENDPOINT_STYLE": "process-definition",
             "DS_INSTANCE_ENDPOINT_STYLE": "process-instances",
+            "PRIORITY_WORKFLOW_CODES_JSON": json.dumps([["wf-a", "WF_A"]]),
         }
 
         with mock.patch.dict(os.environ, env, clear=False):
@@ -64,6 +65,7 @@ class CountryConfigTests(unittest.TestCase):
         self.assertEqual(module.DS_CONFIG["start_code_field"], "processDefinitionCode")
         self.assertEqual(module.DS_CONFIG["definition_endpoint_style"], "process-definition")
         self.assertEqual(module.DS_CONFIG["instance_endpoint_style"], "process-instances")
+        self.assertEqual(module.REPAIR_CONFIG["priority_workflow_codes"], [["wf-a", "WF_A"]])
 
     def test_fuyan_workflows_can_be_overridden_by_json_environment_variable(self):
         workflows = [

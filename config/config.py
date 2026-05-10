@@ -199,6 +199,7 @@ TABLE_CONFIG = {
 
 REPAIR_CONFIG = {
     "scan_lookback_days": int(_get_env("SCAN_LOOKBACK_DAYS", "7")),
+    "priority_workflow_codes": json.loads(_get_env("PRIORITY_WORKFLOW_CODES_JSON", "[]")),
 }
 
 

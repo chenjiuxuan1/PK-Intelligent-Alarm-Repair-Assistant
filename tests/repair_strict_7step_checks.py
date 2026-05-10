@@ -38,6 +38,7 @@ def load_module():
     }
     fake_config_config.REPAIR_CONFIG = {
         "scan_lookback_days": 7,
+        "priority_workflow_codes": [],
     }
     fake_config_config.FUYAN_WORKFLOWS = [
         {"name": "默认复验", "code": "wf-default", "level": "all"},
@@ -780,6 +781,7 @@ class RepairStrict7StepTests(unittest.TestCase):
 
     def test_step2_find_locations_marks_scheduled_parent_only_match_as_manual_review(self):
         module = load_module()
+        module.PRIORITY_WORKFLOWS = [('158514956979200', '印尼-数仓工作流（1/2H）')]
         alerts = [{"id": 1, "table": "ods_cash_model_model", "dt": "2026-05-10", "diff": 1}]
 
         def fake_ds_api_get(endpoint):
@@ -1158,6 +1160,7 @@ class RepairStrict7StepTests(unittest.TestCase):
                 }
             ],
             "post_fuyan_remaining_tables": {"ods_qsq_erp_cpop_settlement_order_procedure"},
+            "display_pending_tables_count": 1,
         }
 
         with mock.patch.object(module, "log"):
@@ -1361,6 +1364,28 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(summary["remaining_tasks"][0]["table"], "dwd_user_coupon")
         self.assertIn("人工处理", summary["remaining_tasks"][0]["error"])
 
+    def test_summarize_repair_outcome_counts_manual_review_tasks_in_display_pending_tables(self):
+        module = load_module()
+        alerts = [{"table": "dwd_user_coupon", "dt": "2026-02-08"}]
+        manual_review_tasks = [
+            {
+                "table": "dwd_user_coupon",
+                "dt": "2026-02-08",
+                "status": "skipped_manual_review",
+                "error": "告警校验范围过长，请人工处理",
+            }
+        ]
+
+        summary = module.summarize_repair_outcome(
+            alerts=alerts,
+            completed_tasks=[],
+            failed_tasks=[],
+            manual_review_tasks=manual_review_tasks,
+            remaining_tables=set(),
+        )
+
+        self.assertEqual(summary["display_pending_tables_count"], 1)
+
     def test_generate_tv_report_describes_resolved_and_manual_review_after_fuyan(self):
         module = load_module()
         summary = {
@@ -1393,6 +1418,7 @@ class RepairStrict7StepTests(unittest.TestCase):
                 }
             ],
             "post_fuyan_remaining_tables": {"dwd_asset_biz_report"},
+            "display_pending_tables_count": 1,
         }
         fuyan_results = [
             {"name": "每日复验全级别数据(W-1)", "status": "success", "id": 806145}
@@ -1430,6 +1456,7 @@ class RepairStrict7StepTests(unittest.TestCase):
                 }
             ],
             "post_fuyan_remaining_tables": {"dwd_fox_mission_log"},
+            "display_pending_tables_count": 1,
         }
 
         with mock.patch.object(module, "log"):
@@ -1466,6 +1493,44 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(final_fuyan_results, fuyan_results)
         self.assertEqual(summary["resolved_count"], 1)
         self.assertEqual(summary["remaining_count"], 0)
+
+    def test_generate_tv_report_uses_display_pending_tables_count_when_present(self):
+        module = load_module()
+        summary = {
+            "initial_alert_count": 1,
+            "resolved_count": 0,
+            "remaining_count": 1,
+            "manual_review_count": 1,
+            "rerun_tasks": [],
+            "resolved_tasks": [],
+            "remaining_tasks": [
+                {"table": "dwd_user_coupon", "error": "告警校验范围过长，请人工处理"}
+            ],
+            "post_fuyan_remaining_tables": set(),
+            "display_pending_tables_count": 1,
+        }
+
+        with mock.patch.object(module, "log"):
+            report = module.generate_tv_report(summary, [])
+
+        self.assertIn("当前未处理告警表: 1 个", report)
+
+    def test_step2_find_locations_uses_configured_priority_workflows(self):
+        module = load_module()
+        module.PRIORITY_WORKFLOWS = [("wf-priority", "PRIORITY")]
+        alerts = [{"id": 1, "table": "dwd_user_info", "dt": "2026-05-09", "diff": 1}]
+        searched_codes = []
+
+        def fake_search(workflow_code, table_name):
+            searched_codes.append(workflow_code)
+            return None
+
+        with mock.patch.object(module, "step2_search_in_workflow", side_effect=fake_search), \
+            mock.patch.object(module, "get_workflow_definition_list", return_value=(True, {"totalList": []}, "")), \
+            mock.patch.object(module, "log"):
+            module.step2_find_locations(alerts)
+
+        self.assertEqual(searched_codes, ["wf-priority"])
 
 
 if __name__ == "__main__":

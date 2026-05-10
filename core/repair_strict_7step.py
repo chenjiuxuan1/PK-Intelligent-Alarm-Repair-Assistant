@@ -41,6 +41,7 @@ DS_INSTANCE_ENDPOINT_STYLE = DS_CONFIG.get('instance_endpoint_style', 'auto')
 QUALITY_RESULT_TABLE = TABLE_CONFIG['quality_result_table']
 MANUAL_REVIEW_STATE_FILE = WORKSPACE_CONFIG['manual_review_state_file']
 SCAN_LOOKBACK_DAYS = REPAIR_CONFIG['scan_lookback_days']
+PRIORITY_WORKFLOWS = REPAIR_CONFIG.get('priority_workflow_codes') or []
 DS_STATUS_DEBUG = os.environ.get('REPAIR_DEBUG_DS_STATUS', '').strip().lower() in {'1', 'true', 'yes', 'on'}
 
 # 维护任务关键词（排除）
@@ -873,16 +874,7 @@ def step2_find_locations(alerts):
     log("="*70)
     
     # 优先搜索这些工作流（提高效率）
-    priority_workflows = [
-        ('158514956979200', 'DWD'),
-        ('158514957656064', 'DWD(D-1)'),
-        ('158514958374912', '国内-数仓工作流(H-1)'),
-        ('158514957337600', '国内-数仓工作流(D-1)'),
-        ('158514957297664', 'DWB'),
-        ('158514957701120', 'DWB(D-1)'),
-        ('158514957779968', 'DWS'),
-        ('158514958004224', 'DWS(D-1)'),
-    ]
+    priority_workflows = PRIORITY_WORKFLOWS
     
     # 缓存所有工作流列表（只获取一次）
     all_workflows = None
@@ -1615,6 +1607,7 @@ def summarize_repair_outcome(alerts, completed_tasks, failed_tasks, manual_revie
         'resolved_count': len(resolved_tasks),
         'remaining_count': len(remaining_tasks),
         'manual_review_count': len(remaining_tasks),
+        'display_pending_tables_count': len(set(remaining_tables) | set(manual_by_table)),
         'rerun_tasks': rerun_tasks,
         'resolved_tasks': resolved_tasks,
         'remaining_tasks': remaining_tasks,
@@ -1689,9 +1682,11 @@ def generate_tv_report(summary, fuyan_results):
     report_lines.append(f"  • 复验启动: {len(fuyan_results)} 个")
     report_lines.append("")
     
-    report_lines.append(
-        f"📋 当前未处理告警表: {len(summary['post_fuyan_remaining_tables'])} 个"
+    pending_tables_count = summary.get(
+        'display_pending_tables_count',
+        len(summary['post_fuyan_remaining_tables'])
     )
+    report_lines.append(f"📋 当前未处理告警表: {pending_tables_count} 个")
     report_lines.append("")
 
     if summary.get('rerun_tasks'):
@@ -1841,7 +1836,7 @@ def main():
     save_manual_review_state(strategy_state)
 
     if manual_review_tasks:
-        log("\n⚠️ 以下任务疑似冗余数据，已转人工处理，不再自动重跑:")
+        log("\n⚠️ 以下任务已转人工处理，不再自动重跑:")
         for task in manual_review_tasks:
             log(f"  - {task['table']}: {task['error']}")
 
