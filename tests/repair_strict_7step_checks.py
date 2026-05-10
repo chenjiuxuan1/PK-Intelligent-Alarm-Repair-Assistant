@@ -1325,6 +1325,42 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(summary["remaining_count"], 1)
         self.assertIn("底层是否需要删数", summary["remaining_tasks"][0]["error"])
 
+    def test_summarize_repair_outcome_keeps_out_of_window_manual_review_as_remaining(self):
+        module = load_module()
+        alerts = [
+            {
+                "table": "dwd_user_coupon",
+                "dt": "2026-02-08",
+                "diff": -7,
+                "status": "skipped_out_of_window",
+            }
+        ]
+        completed_tasks = []
+        failed_tasks = []
+        manual_review_tasks = [
+            {
+                "table": "dwd_user_coupon",
+                "dt": "2026-02-08",
+                "diff": -7,
+                "status": "skipped_manual_review",
+                "error": "告警校验范围过长，请人工处理",
+            }
+        ]
+
+        summary = module.summarize_repair_outcome(
+            alerts=alerts,
+            completed_tasks=completed_tasks,
+            failed_tasks=failed_tasks,
+            manual_review_tasks=manual_review_tasks,
+            remaining_tables=set(),
+        )
+
+        self.assertEqual(summary["resolved_count"], 0)
+        self.assertEqual(summary["remaining_count"], 1)
+        self.assertEqual(summary["manual_review_count"], 1)
+        self.assertEqual(summary["remaining_tasks"][0]["table"], "dwd_user_coupon")
+        self.assertIn("人工处理", summary["remaining_tasks"][0]["error"])
+
     def test_generate_tv_report_describes_resolved_and_manual_review_after_fuyan(self):
         module = load_module()
         summary = {

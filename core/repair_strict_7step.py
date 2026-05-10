@@ -1579,6 +1579,17 @@ def summarize_repair_outcome(alerts, completed_tasks, failed_tasks, manual_revie
                 rerun_task.update(failed_by_table[table])
             rerun_tasks.append(rerun_task)
 
+        if table in manual_by_table:
+            remaining_task = dict(alert)
+            remaining_task.update(completed_by_table.get(table, {}))
+            if table in failed_by_table:
+                remaining_task.update(failed_by_table[table])
+            remaining_task.update(manual_by_table[table])
+            remaining_task['result'] = 'manual_review'
+            remaining_task.setdefault('error', '需人工处理')
+            remaining_tasks.append(remaining_task)
+            continue
+
         if table not in remaining_tables:
             resolved_task = dict(alert)
             resolved_task.update(completed_by_table.get(table, {}))
