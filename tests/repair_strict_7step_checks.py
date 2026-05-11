@@ -1494,6 +1494,91 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(summary["resolved_count"], 1)
         self.assertEqual(summary["remaining_count"], 0)
 
+    def test_wait_for_fuyan_results_discovers_real_process_instance_before_detail_query(self):
+        module = load_module()
+        module.DS_API_MODE = "process_v2"
+        module.DS_INSTANCE_ENDPOINT_STYLE = "process-instances"
+        fuyan_results = [
+            {
+                "name": "每日复验全级别数据(W-1)",
+                "status": "success",
+                "id": 11111,
+                "start_response_id": 11111,
+                "resolved_instance_id": None,
+                "workflow_code": "wf-fuyan",
+                "launched_at": "2026-05-11 09:35:44",
+            }
+        ]
+        detail_calls = []
+
+        def fake_get_instance_detail(project_code, instance_id):
+            detail_calls.append(instance_id)
+            if instance_id == 22222:
+                return True, {"id": 22222, "state": "SUCCESS", "endTime": "2026-05-11 09:36:40"}, ""
+            return False, {}, "query process instance by id error"
+
+        with mock.patch.object(
+            module,
+            "find_recent_instance_by_workflow",
+            return_value={"id": 22222, "state": "RUNNING_EXECUTION", "startTime": "2026-05-11 09:35:45"},
+        ), mock.patch.object(
+            module,
+            "get_instance_detail",
+            side_effect=fake_get_instance_detail,
+        ), mock.patch.object(
+            module,
+            "get_instance_from_list",
+            return_value={},
+        ), mock.patch.object(module, "log"), mock.patch("time.sleep"):
+            final_results = module.wait_for_fuyan_results(
+                fuyan_results,
+                poll_interval=1,
+                max_wait=10,
+            )
+
+        self.assertEqual(detail_calls[0], 22222)
+        self.assertEqual(final_results[0]["id"], 22222)
+        self.assertEqual(final_results[0]["resolved_instance_id"], 22222)
+        self.assertEqual(final_results[0]["final_status"], "success")
+        self.assertEqual(final_results[0]["end_time"], "2026-05-11 09:36:40")
+
+    def test_wait_for_fuyan_results_falls_back_to_instance_list_when_detail_query_fails(self):
+        module = load_module()
+        module.DS_API_MODE = "process_v2"
+        module.DS_INSTANCE_ENDPOINT_STYLE = "process-instances"
+        fuyan_results = [
+            {
+                "name": "两小时复验3级表数据(D-1)",
+                "status": "success",
+                "id": 33333,
+                "workflow_code": "wf-fuyan-l3",
+                "launched_at": "2026-05-11 09:35:44",
+            }
+        ]
+
+        with mock.patch.object(
+            module,
+            "find_recent_instance_by_workflow",
+            return_value={},
+        ), mock.patch.object(
+            module,
+            "get_instance_detail",
+            return_value=(False, {}, "query process instance by id error"),
+        ), mock.patch.object(
+            module,
+            "get_instance_from_list",
+            return_value={"id": 33333, "state": "SUCCESS", "endTime": "2026-05-11 09:36:40"},
+        ), mock.patch.object(module, "log"), mock.patch("time.sleep"):
+            final_results = module.wait_for_fuyan_results(
+                fuyan_results,
+                poll_interval=1,
+                max_wait=10,
+            )
+
+        self.assertEqual(final_results[0]["id"], 33333)
+        self.assertEqual(final_results[0]["final_status"], "success")
+        self.assertEqual(final_results[0]["end_time"], "2026-05-11 09:36:40")
+
     def test_generate_tv_report_uses_display_pending_tables_count_when_present(self):
         module = load_module()
         summary = {

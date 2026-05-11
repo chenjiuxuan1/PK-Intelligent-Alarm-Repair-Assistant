@@ -1473,8 +1473,17 @@ def step5_execute_fuyan(completed_tasks, failed_tasks, alerts):
             instance_id = result.get('data')
             if isinstance(instance_id, list) and len(instance_id) > 0:
                 instance_id = instance_id[0]
+            launched_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             log(f"    ✅ 启动成功: {instance_id}")
-            fuyan_results.append({'name': fuyan_name, 'id': instance_id, 'status': 'success'})
+            fuyan_results.append({
+                'name': fuyan_name,
+                'id': instance_id,
+                'status': 'success',
+                'start_response_id': instance_id,
+                'resolved_instance_id': None,
+                'workflow_code': fuyan_code,
+                'launched_at': launched_at,
+            })
         else:
             error_msg = result.get('msg', '未知错误')
             log(f"    ❌ 启动失败: {error_msg}")
@@ -1495,24 +1504,80 @@ def wait_for_fuyan_results(fuyan_results, poll_interval=10, max_wait=60):
 
     start_time = time.time()
     pending = {str(item['id']): item for item in running_results}
+    for item in pending.values():
+        item['first_seen_at'] = time.time()
 
     while pending and (time.time() - start_time) < max_wait:
         still_pending = {}
         for instance_id, item in pending.items():
-            success, data, msg = ds_api_get(
-                f"/projects/{FUYAN_PROJECT_CODE}/workflow-instances/{instance_id}"
-            )
-            if not success or not data:
-                success, data, msg = ds_api_get(
-                    f"/projects/{FUYAN_PROJECT_CODE}/process-instances/{instance_id}"
+            current_instance_id = item.get('resolved_instance_id') or item.get('id')
+            workflow_code = item.get('workflow_code')
+            launched_at = item.get('launched_at')
+            discovered_instance = {}
+
+            if not item.get('resolved_instance_id') and workflow_code:
+                discovered_instance = find_recent_instance_by_workflow(
+                    FUYAN_PROJECT_CODE,
+                    workflow_code,
+                    launched_at=launched_at,
                 )
+                if discovered_instance.get('id') is not None:
+                    resolved_instance_id = discovered_instance.get('id')
+                    item['resolved_instance_id'] = resolved_instance_id
+                    item['id'] = resolved_instance_id
+                    current_instance_id = resolved_instance_id
+                    debug_log(
+                        f"复验实例发现真实实例 name={item.get('name')} start_response_id={item.get('start_response_id')} "
+                        f"resolved_instance_id={resolved_instance_id}"
+                    )
+
+            success, data, msg = get_instance_detail(FUYAN_PROJECT_CODE, current_instance_id)
             if not success or not data:
-                item['final_status'] = 'query_failed'
-                item['error'] = msg or '查询复验实例状态失败'
-                still_pending[instance_id] = item
+                fallback_data = get_instance_from_list(FUYAN_PROJECT_CODE, current_instance_id)
+                if fallback_data:
+                    success = True
+                    data = fallback_data
+                    msg = ''
+                elif discovered_instance:
+                    success = True
+                    data = discovered_instance
+                    msg = ''
+                elif workflow_code:
+                    recent_instance = find_recent_instance_by_workflow(
+                        FUYAN_PROJECT_CODE,
+                        workflow_code,
+                        launched_at=launched_at,
+                    )
+                    if recent_instance:
+                        if recent_instance.get('id') is not None:
+                            item['resolved_instance_id'] = recent_instance.get('id')
+                            item['id'] = recent_instance.get('id')
+                        success = True
+                        data = recent_instance
+                        msg = ''
+            if not success or not data:
+                instance_age = time.time() - item.get('first_seen_at', start_time)
+                diagnostics = collect_instance_query_diagnostics(
+                    FUYAN_PROJECT_CODE,
+                    instance_id=item.get('id'),
+                    workflow_code=workflow_code,
+                    launched_at=launched_at,
+                )
+                debug_log(
+                    f"复验实例查询失败 name={item.get('name')} instance_id={item.get('id')} "
+                    f"diagnostics={json.dumps(diagnostics, ensure_ascii=False)}"
+                )
+                if instance_age >= max_wait:
+                    item['final_status'] = 'timeout'
+                    item['error'] = f"超过{max_wait}秒未获取到明确状态: {msg or '查询复验实例状态失败'}"
+                else:
+                    still_pending[str(item.get('id'))] = item
                 continue
 
             state = data.get('state', 'UNKNOWN')
+            if data.get('id') is not None:
+                item['id'] = data.get('id')
+                item['resolved_instance_id'] = data.get('id')
             item['state'] = state
             item['end_time'] = data.get('endTime')
             if state in ['SUCCESS', 'FINISHED']:
@@ -1521,7 +1586,7 @@ def wait_for_fuyan_results(fuyan_results, poll_interval=10, max_wait=60):
                 item['final_status'] = 'failed'
                 item['error'] = f"状态: {state}"
             else:
-                still_pending[instance_id] = item
+                still_pending[str(item.get('id'))] = item
 
         pending = still_pending
         if pending:
@@ -1533,7 +1598,12 @@ def wait_for_fuyan_results(fuyan_results, poll_interval=10, max_wait=60):
         item.setdefault('error', '等待复验结果超时')
 
     final_results = []
-    running_by_id = {str(item['id']): item for item in running_results}
+    running_by_id = {}
+    for item in running_results:
+        if item.get('id') is not None:
+            running_by_id[str(item['id'])] = item
+        if item.get('start_response_id') is not None:
+            running_by_id[str(item['start_response_id'])] = item
     for item in fuyan_results:
         instance_id = item.get('id')
         if instance_id is not None and str(instance_id) in running_by_id:
