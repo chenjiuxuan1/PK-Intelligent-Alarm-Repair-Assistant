@@ -686,6 +686,71 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(result, {})
         self.assertNotIn("ALL", seen_state_types)
 
+    def test_find_recent_instance_by_workflow_ignores_scheduled_instance_started_before_launch(self):
+        module = load_module()
+        module.DS_API_MODE = "process_v2"
+        module.DS_INSTANCE_ENDPOINT_STYLE = "process-instances"
+
+        success_items = [
+            {
+                "id": 3159308,
+                "state": "SUCCESS",
+                "startTime": "2026-05-11 09:35:01",
+                "processDefinitionCode": 16916802671296,
+                "commandType": "SCHEDULER",
+            },
+            {
+                "id": 3159315,
+                "state": "SUCCESS",
+                "startTime": "2026-05-11 09:35:46",
+                "processDefinitionCode": 16916802671296,
+                "commandType": "START_PROCESS",
+            },
+        ]
+
+        def fake_get_all_instances_from_lists(project_code, state_type='ALL'):
+            if state_type == "SUCCESS":
+                return success_items
+            return []
+
+        with mock.patch.object(module, "get_all_instances_from_lists", side_effect=fake_get_all_instances_from_lists):
+            result = module.find_recent_instance_by_workflow(
+                "default-project",
+                "16916802671296",
+                launched_at="2026-05-11 09:35:44",
+            )
+
+        self.assertEqual(result["id"], 3159315)
+
+    def test_find_recent_instance_by_workflow_returns_empty_when_only_prelaunch_scheduler_match_exists(self):
+        module = load_module()
+        module.DS_API_MODE = "process_v2"
+        module.DS_INSTANCE_ENDPOINT_STYLE = "process-instances"
+
+        success_items = [
+            {
+                "id": 3159308,
+                "state": "SUCCESS",
+                "startTime": "2026-05-11 09:35:01",
+                "processDefinitionCode": 16916802671296,
+                "commandType": "SCHEDULER",
+            }
+        ]
+
+        def fake_get_all_instances_from_lists(project_code, state_type='ALL'):
+            if state_type == "SUCCESS":
+                return success_items
+            return []
+
+        with mock.patch.object(module, "get_all_instances_from_lists", side_effect=fake_get_all_instances_from_lists):
+            result = module.find_recent_instance_by_workflow(
+                "default-project",
+                "16916802671296",
+                launched_at="2026-05-11 09:35:44",
+            )
+
+        self.assertEqual(result, {})
+
     def test_get_instance_detail_uses_configured_process_instance_style(self):
         module = load_module()
         module.DS_INSTANCE_ENDPOINT_STYLE = "process-instances"

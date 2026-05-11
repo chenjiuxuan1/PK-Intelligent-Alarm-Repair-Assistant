@@ -348,6 +348,8 @@ def find_recent_instance_by_workflow(project_code, workflow_code, launched_at=No
 
             start_dt = parse_ds_datetime(item.get('startTime'))
             if launched_at_dt and start_dt:
+                if start_dt < launched_at_dt:
+                    continue
                 diff_seconds = abs((start_dt - launched_at_dt).total_seconds())
                 if diff_seconds > 600:
                     continue
@@ -361,7 +363,10 @@ def find_recent_instance_by_workflow(project_code, workflow_code, launched_at=No
         return {}
 
     candidates.sort(
-        key=lambda item: parse_ds_datetime(item.get('startTime')) or datetime.min,
+        key=lambda item: (
+            0 if str(item.get('commandType') or '').upper() == 'SCHEDULER' else 1,
+            parse_ds_datetime(item.get('startTime')) or datetime.min,
+        ),
         reverse=True,
     )
     debug_log(
@@ -1320,18 +1325,18 @@ def step4_wait_and_check(running_instances, poll_interval=10, max_wait=60):
                 # 查询失败，增加失败计数
                 item['fail_count'] += 1
                 instance_age = time.time() - item.get('first_seen_at', start_time)
-                diagnostics = collect_instance_query_diagnostics(
-                    PROJECT_CODE,
-                    instance_id=item['instance_id'],
-                    workflow_code=workflow_code,
-                    launched_at=item['task'].get('launched_at'),
-                )
-                debug_log(
-                    f"实例查询失败 table={table} instance_id={item['instance_id']} "
-                    f"diagnostics={json.dumps(diagnostics, ensure_ascii=False)}"
-                )
                 # 超过 60s 还无法拿到明确状态则直接判失败，避免流程长期卡住。
                 if instance_age >= max_wait:
+                    diagnostics = collect_instance_query_diagnostics(
+                        PROJECT_CODE,
+                        instance_id=item['instance_id'],
+                        workflow_code=workflow_code,
+                        launched_at=item['task'].get('launched_at'),
+                    )
+                    debug_log(
+                        f"实例查询失败 table={table} instance_id={item['instance_id']} "
+                        f"diagnostics={json.dumps(diagnostics, ensure_ascii=False)}"
+                    )
                     log(f"  ❌ {table}: 超过{max_wait}秒仍未获取到明确状态 ({msg})")
                     item['task']['final_status'] = 'timeout'
                     item['task']['error'] = f"超过{max_wait}秒未获取到明确状态: {msg}"
