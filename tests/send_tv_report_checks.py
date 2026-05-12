@@ -6,7 +6,7 @@ import urllib.error
 from unittest import mock
 
 
-MODULE_PATH = "/Users/jiangchuanchen/Desktop/INE-Intelligent-Alarm-Repair-Assistant/core/send_tv_report.py"
+MODULE_PATH = "/Users/jiangchuanchen/Desktop/PH-Intelligent-Alarm-Repair-Assistant/core/send_tv_report.py"
 
 
 def load_module():
