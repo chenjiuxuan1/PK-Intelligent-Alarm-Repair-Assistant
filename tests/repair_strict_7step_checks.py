@@ -1312,7 +1312,7 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         self.assertEqual(tables, {"dwd_recent_table"})
 
-    def test_execute_repairs_in_batches_starts_all_tasks_in_single_round(self):
+    def test_execute_repairs_in_batches_limits_parallel_work_to_four(self):
         module = load_module()
         tasks = [{"table": f"table_{idx}", "dt": "2026-04-26"} for idx in range(12)]
         step3_calls = []
@@ -1348,7 +1348,11 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         self.assertEqual(
             step3_calls,
-            [[f"table_{idx}" for idx in range(12)]],
+            [
+                ["table_0", "table_1", "table_2", "table_3"],
+                ["table_4", "table_5", "table_6", "table_7"],
+                ["table_8", "table_9", "table_10", "table_11"],
+            ],
         )
         self.assertEqual(step4_calls, step3_calls)
         self.assertEqual(len(results), 12)
@@ -1676,6 +1680,25 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(summary["remaining_tasks"][0]["table"], "dwd_mkt_sms_cost_monthly")
         self.assertEqual(summary["remaining_tasks"][0]["result"], "manual_review")
         self.assertIn("查询失败", summary["remaining_tasks"][0]["error"])
+
+    def test_summarize_repair_outcome_fills_default_error_for_failed_remaining_task(self):
+        module = load_module()
+        alerts = [{"table": "dwd_user_individual", "dt": "2026-05-12"}]
+        completed_tasks = [{"table": "dwd_user_individual", "dt": "2026-05-12", "end_time": "2026-05-12 14:12:07"}]
+        failed_tasks = [{"table": "dwd_user_individual", "dt": "2026-05-12", "final_status": "failed", "error": ""}]
+
+        summary = module.summarize_repair_outcome(
+            alerts=alerts,
+            completed_tasks=completed_tasks,
+            failed_tasks=failed_tasks,
+            manual_review_tasks=[],
+            remaining_tables={"dwd_user_individual"},
+        )
+
+        self.assertEqual(summary["remaining_count"], 1)
+        self.assertEqual(summary["remaining_tasks"][0]["table"], "dwd_user_individual")
+        self.assertEqual(summary["remaining_tasks"][0]["result"], "manual_review")
+        self.assertEqual(summary["remaining_tasks"][0]["error"], "自动重跑失败，需人工处理")
 
     def test_summarize_repair_outcome_counts_manual_review_tasks_in_display_pending_tables(self):
         module = load_module()

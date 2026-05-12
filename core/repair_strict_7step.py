@@ -1549,15 +1549,31 @@ def split_ready_and_blocked_tasks(tasks, in_flight_keys):
     return ready_tasks, blocked_tasks
 
 
-def execute_repairs_in_batches(tasks):
-    """统一启动所有待修复任务，再统一等待全部任务完成。"""
-    log("\n" + "=" * 70)
-    log(f"【统一执行】准备启动 {len(tasks)} 个修复任务")
-    log("=" * 70)
+def execute_repairs_in_batches(tasks, max_parallel=4):
+    """分批执行修复任务，控制同时运行的实例数量。"""
+    if max_parallel <= 0:
+        raise ValueError("max_parallel must be greater than 0")
 
-    all_results, running_instances = step3_start_repair(tasks)
-    completed_tasks, failed_tasks = step4_wait_and_check(running_instances)
-    return all_results, completed_tasks, failed_tasks
+    all_results = []
+    all_completed_tasks = []
+    all_failed_tasks = []
+
+    total_batches = (len(tasks) + max_parallel - 1) // max_parallel
+
+    for batch_index, start in enumerate(range(0, len(tasks), max_parallel), 1):
+        batch_tasks = tasks[start:start + max_parallel]
+        log("\n" + "=" * 70)
+        log(f"【批次 {batch_index}/{total_batches}】执行 {len(batch_tasks)} 个修复任务")
+        log("=" * 70)
+
+        batch_results, running_instances = step3_start_repair(batch_tasks)
+        completed_tasks, failed_tasks = step4_wait_and_check(running_instances)
+
+        all_results.extend(batch_results)
+        all_completed_tasks.extend(completed_tasks)
+        all_failed_tasks.extend(failed_tasks)
+
+    return all_results, all_completed_tasks, all_failed_tasks
 
 
 def step5_execute_fuyan(completed_tasks, failed_tasks, alerts):
@@ -1798,7 +1814,8 @@ def summarize_repair_outcome(alerts, completed_tasks, failed_tasks, manual_revie
             remaining_task = dict(alert)
             remaining_task.update(failed_by_table[table])
             remaining_task['result'] = 'manual_review'
-            remaining_task.setdefault('error', '自动重跑失败，需人工处理')
+            if not remaining_task.get('error'):
+                remaining_task['error'] = '自动重跑失败，需人工处理'
             remaining_tasks.append(remaining_task)
             continue
 
@@ -1809,7 +1826,8 @@ def summarize_repair_outcome(alerts, completed_tasks, failed_tasks, manual_revie
                 remaining_task.update(failed_by_table[table])
             remaining_task.update(manual_by_table[table])
             remaining_task['result'] = 'manual_review'
-            remaining_task.setdefault('error', '需人工处理')
+            if not remaining_task.get('error'):
+                remaining_task['error'] = '需人工处理'
             remaining_tasks.append(remaining_task)
             continue
 
@@ -1828,9 +1846,11 @@ def summarize_repair_outcome(alerts, completed_tasks, failed_tasks, manual_revie
             remaining_task.update(manual_by_table[table])
         remaining_task['result'] = 'manual_review'
         if is_suspected_redundant_data(remaining_task):
-            remaining_task.setdefault('error', build_redundant_data_manual_review_reason())
+            if not remaining_task.get('error'):
+                remaining_task['error'] = build_redundant_data_manual_review_reason()
         else:
-            remaining_task.setdefault('error', '复验完成后告警仍存在，需人工处理')
+            if not remaining_task.get('error'):
+                remaining_task['error'] = '复验完成后告警仍存在，需人工处理'
         remaining_tasks.append(remaining_task)
 
     return {
