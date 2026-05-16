@@ -1001,6 +1001,42 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         self.assertEqual(result["id"], 1534334)
 
+    def test_find_recent_instance_by_workflow_prefers_candidate_closest_to_launch_time(self):
+        module = load_module()
+        module.DS_API_MODE = "process_v2"
+        module.DS_INSTANCE_ENDPOINT_STYLE = "process-instances"
+
+        running_items = [
+            {
+                "id": 1540522,
+                "state": "SUCCESS",
+                "startTime": "2026-05-16 08:00:03",
+                "processDefinitionCode": 18641948384363,
+                "commandType": "START_PROCESS",
+            },
+            {
+                "id": 1540525,
+                "state": "STOP",
+                "startTime": "2026-05-16 08:00:20",
+                "processDefinitionCode": 18641948384363,
+                "commandType": "START_PROCESS",
+            },
+        ]
+
+        def fake_get_all_instances_from_lists(project_code, state_type='ALL'):
+            if state_type in ("RUNNING_EXECUTION", "SUCCESS", "FAILURE", "READY_STOP", None):
+                return running_items
+            return []
+
+        with mock.patch.object(module, "get_all_instances_from_lists", side_effect=fake_get_all_instances_from_lists):
+            result = module.find_recent_instance_by_workflow(
+                "default-project",
+                "18641948384363",
+                launched_at="2026-05-16 08:00:06",
+            )
+
+        self.assertEqual(result["id"], 1540522)
+
     def test_get_instance_detail_uses_configured_process_instance_style(self):
         module = load_module()
         module.DS_INSTANCE_ENDPOINT_STYLE = "process-instances"

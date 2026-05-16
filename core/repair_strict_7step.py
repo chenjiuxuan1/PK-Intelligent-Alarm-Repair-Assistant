@@ -508,13 +508,18 @@ def find_recent_instance_by_workflow(project_code, workflow_code, launched_at=No
         )
         return {}
 
-    candidates.sort(
-        key=lambda item: (
-            0 if str(item.get('commandType') or '').upper() == 'SCHEDULER' else 1,
-            parse_ds_datetime(item.get('startTime')) or datetime.min,
-        ),
-        reverse=True,
-    )
+    def candidate_sort_key(item):
+        start_dt = parse_ds_datetime(item.get('startTime'))
+        command_type = str(item.get('commandType') or '').upper()
+        is_non_scheduler = 0 if command_type == 'SCHEDULER' else 1
+        if launched_at_dt and start_dt:
+            distance = -abs((start_dt - launched_at_dt).total_seconds())
+        else:
+            distance = float('-inf')
+        timestamp = start_dt.timestamp() if start_dt else float('-inf')
+        return (is_non_scheduler, distance, timestamp)
+
+    candidates.sort(key=candidate_sort_key, reverse=True)
     debug_log(
         f"工作流 {workflow_code} 匹配到 {len(candidates)} 个近期实例，选中实例ID="
         f"{candidates[0].get('id')} state={candidates[0].get('state')}"
