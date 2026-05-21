@@ -2546,6 +2546,55 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertTrue(success)
         self.assertEqual(data["totalList"], [{"code": "wf-1"}])
 
+    def test_get_workflow_definition_list_falls_back_to_query_process_definition_list(self):
+        module = load_module()
+
+        def fake_ds_api_get(endpoint):
+            if endpoint.endswith("/workflow-definition?pageNo=1&pageSize=100"):
+                return False, {}, "non-json response: <!DOCTYPE html>"
+            if endpoint.endswith("/process-definition?pageNo=1&pageSize=100"):
+                return False, {}, "non-json response: <!DOCTYPE html>"
+            if endpoint.endswith("/workflow-definition/query-process-definition-list"):
+                return False, {}, "not found"
+            if endpoint.endswith("/process-definition/query-process-definition-list"):
+                return True, [{"code": "wf-pk-1"}], ""
+            raise AssertionError(endpoint)
+
+        with mock.patch.object(module, "ds_api_get", side_effect=fake_ds_api_get):
+            success, data, msg = module.get_workflow_definition_list()
+
+        self.assertTrue(success)
+        self.assertEqual(data["totalList"], [{"code": "wf-pk-1"}])
+
+    def test_step2_find_locations_uses_query_process_definition_list_fallback(self):
+        module = load_module()
+        alerts = [{"id": 1, "table": "dwd_rsk_feature_action", "dt": "2026-05-20"}]
+
+        def fake_ds_api_get(endpoint):
+            if endpoint.endswith("/workflow-definition?pageNo=1&pageSize=100"):
+                return False, {}, "non-json response: <!DOCTYPE html>"
+            if endpoint.endswith("/process-definition?pageNo=1&pageSize=100"):
+                return False, {}, "non-json response: <!DOCTYPE html>"
+            if endpoint.endswith("/workflow-definition/query-process-definition-list"):
+                return False, {}, "not found"
+            if endpoint.endswith("/process-definition/query-process-definition-list"):
+                return True, [{"code": "wf-pk-1"}], ""
+            if endpoint == "/projects/default-project/workflow-definition/wf-pk-1":
+                return False, {}, "non-json response: <!DOCTYPE html>"
+            if endpoint == "/projects/default-project/process-definition/wf-pk-1":
+                return True, {
+                    "processDefinition": {"name": "PK_DWD_RSK"},
+                    "taskDefinitionList": [{"code": "task-rsk-1", "name": "dwd_rsk_feature_action"}],
+                }, ""
+            return False, {}, f"unexpected endpoint: {endpoint}"
+
+        with mock.patch.object(module, "ds_api_get", side_effect=fake_ds_api_get):
+            tasks = module.step2_find_locations(alerts)
+
+        self.assertEqual(tasks[0]["workflow_code"], "wf-pk-1")
+        self.assertEqual(tasks[0]["task_code"], "task-rsk-1")
+        self.assertEqual(tasks[0]["workflow_name"], "PK_DWD_RSK")
+
     def test_step3_start_repair_falls_back_when_process_style_returns_empty_success_data(self):
         module = load_module()
         tasks = [

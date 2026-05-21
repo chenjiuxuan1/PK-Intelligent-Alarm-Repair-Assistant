@@ -81,12 +81,20 @@ def _get_definition_detail_endpoints(project_code, workflow_code):
 
 def _get_definition_list_endpoint_templates():
     if DS_DEFINITION_ENDPOINT_STYLE == 'workflow-definition':
-        return ["/projects/{project_code}/workflow-definition?pageNo={page_no}&pageSize=100"]
+        return [
+            "/projects/{project_code}/workflow-definition?pageNo={page_no}&pageSize=100",
+            "/projects/{project_code}/workflow-definition/query-process-definition-list",
+        ]
     if DS_DEFINITION_ENDPOINT_STYLE == 'process-definition':
-        return ["/projects/{project_code}/process-definition?pageNo={page_no}&pageSize=100"]
+        return [
+            "/projects/{project_code}/process-definition?pageNo={page_no}&pageSize=100",
+            "/projects/{project_code}/process-definition/query-process-definition-list",
+        ]
     return [
         "/projects/{project_code}/workflow-definition?pageNo={page_no}&pageSize=100",
         "/projects/{project_code}/process-definition?pageNo={page_no}&pageSize=100",
+        "/projects/{project_code}/workflow-definition/query-process-definition-list",
+        "/projects/{project_code}/process-definition/query-process-definition-list",
     ]
 
 
@@ -300,6 +308,22 @@ def get_workflow_definition_list():
     last_msg = ""
 
     for endpoint_template in endpoint_templates:
+        if "{page_no}" not in endpoint_template:
+            endpoint = endpoint_template.format(project_code=PROJECT_CODE)
+            success, data, msg = ds_api_get(endpoint)
+            if not success:
+                last_msg = msg
+                continue
+
+            if isinstance(data, list) and data:
+                return True, {'totalList': data}, ''
+
+            if isinstance(data, dict):
+                total_list = data.get('totalList', [])
+                if total_list:
+                    return True, {'totalList': total_list}, ''
+            continue
+
         page_no = 1
         total_pages = 1
         merged_total_list = []
@@ -863,7 +887,14 @@ def ds_api_get(endpoint):
     req.add_header('Accept', 'application/json, text/plain, */*')
     try:
         with urllib.request.urlopen(req, timeout=15) as response:
-            result = json.loads(response.read().decode('utf-8'))
+            raw_text = response.read().decode('utf-8')
+            try:
+                result = json.loads(raw_text)
+            except json.JSONDecodeError:
+                snippet = raw_text[:120].replace('\n', ' ').strip()
+                if not snippet:
+                    snippet = '<empty response>'
+                return False, {}, f"non-json response: {snippet}"
             return result.get('code') == 0, result.get('data', {}), result.get('msg', '')
     except Exception as e:
         return False, {}, str(e)
