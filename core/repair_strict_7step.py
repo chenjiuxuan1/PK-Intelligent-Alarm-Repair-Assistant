@@ -70,9 +70,15 @@ def debug_log(msg):
 
 def _get_definition_detail_endpoints(project_code, workflow_code):
     if DS_DEFINITION_ENDPOINT_STYLE == 'workflow-definition':
-        return [f"/projects/{project_code}/workflow-definition/{workflow_code}"]
+        return [
+            f"/projects/{project_code}/workflow-definition/{workflow_code}",
+            f"/projects/{project_code}/process-definition/{workflow_code}",
+        ]
     if DS_DEFINITION_ENDPOINT_STYLE == 'process-definition':
-        return [f"/projects/{project_code}/process-definition/{workflow_code}"]
+        return [
+            f"/projects/{project_code}/process-definition/{workflow_code}",
+            f"/projects/{project_code}/workflow-definition/{workflow_code}",
+        ]
     return [
         f"/projects/{project_code}/workflow-definition/{workflow_code}",
         f"/projects/{project_code}/process-definition/{workflow_code}",
@@ -84,11 +90,15 @@ def _get_definition_list_endpoint_templates():
         return [
             "/projects/{project_code}/workflow-definition?pageNo={page_no}&pageSize=100",
             "/projects/{project_code}/workflow-definition/query-process-definition-list",
+            "/projects/{project_code}/process-definition?pageNo={page_no}&pageSize=100",
+            "/projects/{project_code}/process-definition/query-process-definition-list",
         ]
     if DS_DEFINITION_ENDPOINT_STYLE == 'process-definition':
         return [
             "/projects/{project_code}/process-definition?pageNo={page_no}&pageSize=100",
             "/projects/{project_code}/process-definition/query-process-definition-list",
+            "/projects/{project_code}/workflow-definition?pageNo={page_no}&pageSize=100",
+            "/projects/{project_code}/workflow-definition/query-process-definition-list",
         ]
     return [
         "/projects/{project_code}/workflow-definition?pageNo={page_no}&pageSize=100",

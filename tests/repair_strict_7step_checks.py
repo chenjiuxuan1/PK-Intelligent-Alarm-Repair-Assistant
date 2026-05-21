@@ -2595,6 +2595,42 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(tasks[0]["task_code"], "task-rsk-1")
         self.assertEqual(tasks[0]["workflow_name"], "PK_DWD_RSK")
 
+    def test_get_workflow_definition_list_falls_back_to_workflow_definition_when_process_style_is_configured(self):
+        module = load_module()
+        module.DS_DEFINITION_ENDPOINT_STYLE = "process-definition"
+
+        def fake_ds_api_get(endpoint):
+            if endpoint.endswith("/process-definition?pageNo=1&pageSize=100"):
+                return False, {}, "non-json response: <!DOCTYPE html>"
+            if endpoint.endswith("/process-definition/query-process-definition-list"):
+                return False, {}, "non-json response: <!DOCTYPE html>"
+            if endpoint.endswith("/workflow-definition?pageNo=1&pageSize=100"):
+                return True, {"totalList": [{"code": "wf-pk-2"}], "totalPage": 1}, ""
+            raise AssertionError(endpoint)
+
+        with mock.patch.object(module, "ds_api_get", side_effect=fake_ds_api_get):
+            success, data, msg = module.get_workflow_definition_list()
+
+        self.assertTrue(success)
+        self.assertEqual(data["totalList"], [{"code": "wf-pk-2"}])
+
+    def test_get_workflow_definition_detail_falls_back_to_workflow_definition_when_process_style_is_configured(self):
+        module = load_module()
+        module.DS_DEFINITION_ENDPOINT_STYLE = "process-definition"
+
+        def fake_ds_api_get(endpoint):
+            if endpoint == "/projects/default-project/process-definition/wf-pk-2":
+                return False, {}, "non-json response: <!DOCTYPE html>"
+            if endpoint == "/projects/default-project/workflow-definition/wf-pk-2":
+                return True, {"processDefinition": {"name": "WF PK 2"}}, ""
+            raise AssertionError(endpoint)
+
+        with mock.patch.object(module, "ds_api_get", side_effect=fake_ds_api_get):
+            success, data, msg = module.get_workflow_definition_detail("wf-pk-2")
+
+        self.assertTrue(success)
+        self.assertEqual(data["processDefinition"]["name"], "WF PK 2")
+
     def test_step3_start_repair_falls_back_when_process_style_returns_empty_success_data(self):
         module = load_module()
         tasks = [
