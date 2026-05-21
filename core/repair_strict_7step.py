@@ -131,7 +131,12 @@ def _get_start_attempts():
     if DS_START_ENDPOINT != 'auto' or DS_START_CODE_FIELD != 'auto':
         endpoint = DS_START_ENDPOINT if DS_START_ENDPOINT != 'auto' else 'start-process-instance'
         code_field = DS_START_CODE_FIELD if DS_START_CODE_FIELD != 'auto' else 'processDefinitionCode'
-        return [(endpoint, code_field)]
+        attempts = [(endpoint, code_field)]
+        if endpoint == 'start-process-instance':
+            attempts.append(('start-workflow-instance', 'workflowDefinitionCode'))
+        elif endpoint == 'start-workflow-instance':
+            attempts.append(('start-process-instance', 'processDefinitionCode'))
+        return attempts
 
     if DS_API_MODE == 'workflow_v1':
         return [('start-workflow-instance', 'workflowDefinitionCode')]

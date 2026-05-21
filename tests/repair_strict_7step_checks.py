@@ -523,6 +523,42 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(results[0]["instance_id"], 45678)
         self.assertEqual(running_instances[0]["instance_id"], 45678)
 
+    def test_step3_start_repair_falls_back_when_configured_process_start_returns_405(self):
+        module = load_module()
+        module.DS_START_ENDPOINT = "start-process-instance"
+        module.DS_START_CODE_FIELD = "processDefinitionCode"
+        tasks = [
+            {
+                "table": "dwd_asset_report_payment_channel_stats",
+                "dt": "2026-05-20",
+                "workflow_code": "wf-405",
+                "workflow_name": "DWD",
+                "task_code": "task-405",
+                "task_name": "dwd_asset_report_payment_channel_stats",
+            }
+        ]
+        attempts = []
+
+        def fake_ds_api_post(endpoint, data):
+            attempts.append((endpoint, dict(data)))
+            if endpoint.endswith("start-process-instance"):
+                return False, {}, "HTTP Error 405: Method Not Allowed"
+            if endpoint.endswith("start-workflow-instance"):
+                return True, {"data": [65432]}, ""
+            raise AssertionError(endpoint)
+
+        with mock.patch.object(module, "ds_api_post", side_effect=fake_ds_api_post), \
+            mock.patch.object(module, "log"), \
+            mock.patch("time.sleep"):
+            results, running_instances = module.step3_start_repair(tasks)
+
+        self.assertEqual(len(attempts), 2)
+        self.assertTrue(attempts[0][0].endswith("start-process-instance"))
+        self.assertTrue(attempts[1][0].endswith("start-workflow-instance"))
+        self.assertEqual(results[0]["status"], "success")
+        self.assertEqual(results[0]["instance_id"], 65432)
+        self.assertEqual(running_instances[0]["instance_id"], 65432)
+
     def test_step3_start_repair_skips_when_workflow_conflict_does_not_clear(self):
         module = load_module()
         tasks = [
