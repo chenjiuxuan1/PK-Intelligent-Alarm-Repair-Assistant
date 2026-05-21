@@ -14,55 +14,37 @@
 """
 
 import os
-import urllib.request
-import urllib.error
 import json
 import sys
 import argparse
+import urllib.request
 
-# DolphinScheduler 配置
-DS_CONFIG = {
-    'base_url': 'http://172.20.0.235:12345/dolphinscheduler',
-    'token': os.environ.get('DS_TOKEN', ''),
-    'project_code': '158514956085248',
-    'project_name': '国内数仓-工作流'
-}
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from config import auto_load_env  # noqa: F401
+from config.config import DS_CONFIG
+from dolphinscheduler.dolphinscheduler_api import DolphinSchedulerClient
+
+CLIENT = DolphinSchedulerClient(base_url=DS_CONFIG['base_url'], token=DS_CONFIG['token'])
+PROJECT_NAME = DS_CONFIG.get('project_name', '当前数仓-工作流')
 
 
 def fetch_running_instances():
     """获取正在运行的工作流实例 (DS 3.3.0: workflow-instances)"""
-    url = f"{DS_CONFIG['base_url']}/projects/{DS_CONFIG['project_code']}/workflow-instances"
-    params = "?stateType=RUNNING_EXECUTION&pageNo=1&pageSize=100"
-    
-    req = urllib.request.Request(url + params)
-    req.add_header('token', DS_CONFIG['token'])
-    
-    try:
-        with urllib.request.urlopen(req, timeout=15) as response:
-            result = json.loads(response.read().decode('utf-8'))
-            if result.get('code') == 0:
-                return True, result.get('data', {}).get('totalList', [])
-    except Exception as e:
-        print(f"❌ 查询实例失败: {e}")
-    
+    result = CLIENT.get_workflow_instances(str(DS_CONFIG['project_code']), page_size=100)
+    if result.get('success'):
+        return True, result.get('data', [])
+    print(f"❌ 查询实例失败: {result.get('error_message', 'unknown error')}")
     return False, []
 
 
 def get_instance_detail(instance_id):
     """获取实例详情 (DS 3.3.0: workflow-instances)"""
-    url = f"{DS_CONFIG['base_url']}/projects/{DS_CONFIG['project_code']}/workflow-instances/{instance_id}"
-    
-    req = urllib.request.Request(url)
-    req.add_header('token', DS_CONFIG['token'])
-    
-    try:
-        with urllib.request.urlopen(req, timeout=10) as response:
-            result = json.loads(response.read().decode('utf-8'))
-            if result.get('code') == 0:
-                return result.get('data', {})
-    except Exception as e:
-        print(f"  ⚠️ 获取实例详情失败: {e}")
-    
+    result = CLIENT.get_instance_detail(str(DS_CONFIG['project_code']), instance_id)
+    if result.get('success'):
+        return result.get('data', {})
+    print(f"  ⚠️ 获取实例详情失败: {result.get('error_message', 'unknown error')}")
     return {}
 
 
@@ -78,27 +60,27 @@ def check_workflow_schedule(process_code):
             'schedule_id': str  # 调度ID
         }
     """
-    url = f"{DS_CONFIG['base_url']}/projects/{DS_CONFIG['project_code']}/schedules"
-    
-    req = urllib.request.Request(url)
-    req.add_header('token', DS_CONFIG['token'])
-    
     try:
+        path = f"{DS_CONFIG['base_url']}/projects/{DS_CONFIG['project_code']}/schedules?pageNo=1&pageSize=200"
+        req = urllib.request.Request(path, headers={'token': DS_CONFIG['token']})
         with urllib.request.urlopen(req, timeout=10) as response:
             result = json.loads(response.read().decode('utf-8'))
-            if result.get('code') == 0:
-                schedules = result.get('data', {}).get('totalList', [])
-                
-                # 查找该工作流的调度配置
-                for sch in schedules:
-                    if str(sch.get('processDefinitionCode')) == str(process_code):
-                        return {
-                            'has_schedule': True,
-                            'schedule_status': sch.get('releaseState', 'UNKNOWN'),  # ONLINE/OFFLINE
-                            'cron': sch.get('crontab', 'N/A'),
-                            'schedule_id': sch.get('id', 'N/A'),
-                            'schedule_name': sch.get('processDefinitionName', 'N/A')
-                        }
+        if result.get('code') == 0:
+            schedules = result.get('data', {}).get('totalList', [])
+            for sch in schedules:
+                schedule_code = (
+                    sch.get('processDefinitionCode')
+                    or sch.get('workflowDefinitionCode')
+                    or sch.get('definitionCode')
+                )
+                if str(schedule_code) == str(process_code):
+                    return {
+                        'has_schedule': True,
+                        'schedule_status': sch.get('releaseState', 'UNKNOWN'),
+                        'cron': sch.get('crontab', 'N/A'),
+                        'schedule_id': sch.get('id', 'N/A'),
+                        'schedule_name': sch.get('processDefinitionName', 'N/A'),
+                    }
     except Exception as e:
         print(f"  ⚠️ 查询调度配置失败: {e}")
     
@@ -114,32 +96,11 @@ def check_workflow_schedule(process_code):
 
 def stop_instance(instance_id):
     """停止工作流实例"""
-    url = f"{DS_CONFIG['base_url']}/projects/{DS_CONFIG['project_code']}/executors/execute"
-    
-    data = {
-        'processInstanceId': instance_id,
-        'executeType': 'STOP'
-    }
-    
-    req = urllib.request.Request(
-        url, 
-        data=json.dumps(data).encode('utf-8'),
-        headers={'Content-Type': 'application/json'},
-        method='POST'
-    )
-    req.add_header('token', DS_CONFIG['token'])
-    
-    try:
-        with urllib.request.urlopen(req, timeout=10) as response:
-            result = json.loads(response.read().decode('utf-8'))
-            if result.get('code') == 0:
-                return True
-            else:
-                print(f"  ❌ 停止失败: {result.get('msg')}")
-                return False
-    except Exception as e:
-        print(f"  ❌ 停止异常: {e}")
-        return False
+    result = CLIENT.stop_instance(str(DS_CONFIG['project_code']), instance_id)
+    if result.get('success'):
+        return True
+    print(f"  ❌ 停止异常: {result.get('error_message', 'unknown error')}")
+    return False
 
 
 def analyze_and_stop_abnormal(stop_mode=False, force=False):
@@ -151,7 +112,7 @@ def analyze_and_stop_abnormal(stop_mode=False, force=False):
     - 但该工作流没有定时配置 或 调度已下线（OFFLINE）
     """
     print("=" * 100)
-    print(f"📊 项目: {DS_CONFIG['project_name']}")
+    print(f"📊 项目: {PROJECT_NAME}")
     print("🔍 检测'无定时配置但被调度启动'的异常实例...")
     print("=" * 100)
     
@@ -169,8 +130,7 @@ def analyze_and_stop_abnormal(stop_mode=False, force=False):
     for i, inst in enumerate(instances, 1):
         instance_id = inst.get('id')
         name = inst.get('name', 'N/A')
-        process_code = inst.get('processDefinitionCode')
-        state = inst.get('state', 'N/A')
+        process_code = inst.get('processDefinitionCode') or inst.get('workflowDefinitionCode')
         start_time = inst.get('startTime', 'N/A')
         
         # 获取实例详情

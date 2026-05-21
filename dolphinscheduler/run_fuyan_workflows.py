@@ -18,19 +18,18 @@ from config.config import DS_CONFIG, FUYAN_WORKFLOWS
 日期：2026-03-23
 """
 
-import urllib.request
-import urllib.error
-import json
 import time
 from datetime import datetime
-from urllib.parse import urlencode
+
+from dolphinscheduler.dolphinscheduler_api import DolphinSchedulerClient
 
 # DolphinScheduler 配置
 DS_ENVIRONMENT_CODE = DS_CONFIG['environment_code']
 DS_TENANT_CODE = DS_CONFIG['tenant_code']
+CLIENT = DolphinSchedulerClient(base_url=DS_CONFIG['base_url'], token=DS_CONFIG['token'])
 
 
-def start_workflow(project_code, workflow_code, workflow_name, dt=None):
+def start_workflow(project_code, workflow_code, workflow_name, dt=None, start_node_list=None):
     """
     启动工作流
     
@@ -43,53 +42,20 @@ def start_workflow(project_code, workflow_code, workflow_name, dt=None):
     Returns:
         tuple: (success: bool, instance_id: str, message: str)
     """
-    url = f"{DS_CONFIG['base_url']}/projects/{project_code}/executors/start-process-instance"
-    
-    # 构建请求体（参考dolphinscheduler_api.py）
-    body = {
-        'processDefinitionCode': workflow_code,
-        'failureStrategy': 'CONTINUE',
-        'warningType': 'NONE',
-        'warningGroupId': '0',
-        'processInstancePriority': 'MEDIUM',
-        'workerGroup': 'default',
-        'environmentCode': DS_ENVIRONMENT_CODE,
-        'tenantCode': DS_TENANT_CODE,
-        'taskDependType': 'TASK_POST',
-        'runMode': 'RUN_MODE_SERIAL',
-        'execType': 'START_PROCESS',
-        'dryRun': '0',
-        'scheduleTime': '',  # 必须传空字符串
-    }
-    
-    # 添加业务日期参数
-    if dt:
-        body['startParams'] = json.dumps({"dt": dt})
-    
-    headers = {
-        'token': DS_CONFIG['token'],
-        'Content-Type': 'application/x-www-form-urlencoded'
-    }
-    
-    try:
-        # 编码请求体
-        encoded_body = urlencode(body).encode('utf-8')
-        
-        req = urllib.request.Request(url, data=encoded_body, headers=headers, method='POST')
-        
-        with urllib.request.urlopen(req, timeout=30) as response:
-            result = json.loads(response.read().decode('utf-8'))
-            
-            if result.get('code') == 0:
-                instance_id = result.get('data')
-                return True, instance_id, "启动成功"
-            else:
-                return False, None, result.get('msg', 'Unknown error')
-                
-    except urllib.error.HTTPError as e:
-        return False, None, f"HTTP {e.code}: {e.reason}"
-    except Exception as e:
-        return False, None, f"异常: {str(e)}"
+    custom_params = {"dt": dt} if dt else None
+    task_depend_type = 'TASK_ONLY' if start_node_list else 'TASK_POST'
+    result = CLIENT.start_workflow(
+        project_code=str(project_code),
+        process_code=str(workflow_code),
+        custom_params=custom_params,
+        task_code=str(start_node_list) if start_node_list else None,
+        task_depend_type=task_depend_type,
+        environment_code=DS_ENVIRONMENT_CODE,
+        tenant_code=DS_TENANT_CODE,
+    )
+    if result.get('success'):
+        return True, result.get('instance_id'), "启动成功"
+    return False, None, result.get('error_message', 'Unknown error')
 
 
 def run_all_fuyan_workflows(dt=None, interval=5):
@@ -121,6 +87,7 @@ def run_all_fuyan_workflows(dt=None, interval=5):
         workflow_name = wf['workflow_name']
         schedule = wf['schedule']
         level = wf['level']
+        start_node_list = wf.get('startNodeList') or wf.get('start_node_list')
         
         print(f"[{i}/{len(FUYAN_WORKFLOWS)}] 🚀 启动: {workflow_name}")
         print(f"      项目: {wf['project_name']}")
@@ -129,7 +96,7 @@ def run_all_fuyan_workflows(dt=None, interval=5):
         
         # 启动工作流
         success, instance_id, message = start_workflow(
-            project_code, workflow_code, workflow_name, dt
+            project_code, workflow_code, workflow_name, dt, start_node_list
         )
         
         if success:

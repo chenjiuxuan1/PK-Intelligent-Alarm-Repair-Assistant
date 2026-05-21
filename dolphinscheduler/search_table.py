@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 
-# 自动加载环境变量
 import sys
-sys.path.insert(0, "/home/node/.openclaw/workspace")
-import auto_load_env
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from config import auto_load_env  # noqa: F401
+from config.config import DS_CONFIG
+from dolphinscheduler.dolphinscheduler_api import DolphinSchedulerClient
 
 # -*- coding: utf-8 -*-
 """
@@ -14,21 +17,12 @@ import auto_load_env
 日期：2026-03-23
 """
 
-import os
-import urllib.request
-import urllib.error
 import json
-import sys
 import argparse
 import re
 
-# DolphinScheduler 配置
-DS_CONFIG = {
-    'base_url': 'http://172.20.0.235:12345/dolphinscheduler',
-    'token': os.environ.get('DS_TOKEN', ''),
-    'project_code': '158514956085248',
-    'project_name': '国内数仓-工作流'
-}
+CLIENT = DolphinSchedulerClient(base_url=DS_CONFIG['base_url'], token=DS_CONFIG['token'])
+PROJECT_NAME = DS_CONFIG.get('project_name', '当前数仓-工作流')
 
 
 def fetch_all_workflows():
@@ -38,34 +32,11 @@ def fetch_all_workflows():
     page_size = 50
     
     while True:
-        url = f"{DS_CONFIG['base_url']}/projects/{DS_CONFIG['project_code']}/workflow-definition"
-        params = f"?pageNo={page_no}&pageSize={page_size}"
-        
-        req = urllib.request.Request(url + params)
-        req.add_header('token', DS_CONFIG['token'])
-        
-        try:
-            with urllib.request.urlopen(req, timeout=15) as response:
-                result = json.loads(response.read().decode('utf-8'))
-                
-                if result.get('code') == 0:
-                    workflows = result.get('data', {}).get('totalList', [])
-                    total = result.get('data', {}).get('total', 0)
-                    
-                    if not workflows:
-                        break
-                    
-                    all_workflows.extend(workflows)
-                    
-                    if len(all_workflows) >= total:
-                        break
-                    
-                    page_no += 1
-                else:
-                    break
-        except:
+        result = CLIENT.get_workflows_list(str(DS_CONFIG['project_code']))
+        if not result.get('success'):
             break
-    
+        all_workflows = result.get('data', [])
+        break
     return all_workflows
 
 
@@ -76,19 +47,10 @@ def get_workflow_detail(process_code):
     Returns:
         dict: 工作流详情，包含 taskDefinitionList
     """
-    url = f"{DS_CONFIG['base_url']}/projects/{DS_CONFIG['project_code']}/workflow-definition/{process_code}"
-    
-    req = urllib.request.Request(url)
-    req.add_header('token', DS_CONFIG['token'])
-    
-    try:
-        with urllib.request.urlopen(req, timeout=10) as response:
-            result = json.loads(response.read().decode('utf-8'))
-            if result.get('code') == 0:
-                return result.get('data', {})
-    except Exception as e:
-        print(f"    ⚠️ 获取详情失败: {e}")
-    
+    result = CLIENT.get_workflow_info(str(DS_CONFIG['project_code']), str(process_code))
+    if result.get('success'):
+        return result.get('data', {})
+    print(f"    ⚠️ 获取详情失败: {result.get('error_message', 'unknown error')}")
     return {}
 
 
@@ -158,7 +120,7 @@ def search_table_in_workflows(search_term):
         search_term: 要搜索的表名或关键词
     """
     print("=" * 100)
-    print(f"🔍 在 [{DS_CONFIG['project_name']}] 中搜索: '{search_term}'")
+    print(f"🔍 在 [{PROJECT_NAME}] 中搜索: '{search_term}'")
     print("=" * 100)
     print()
     

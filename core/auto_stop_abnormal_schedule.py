@@ -15,6 +15,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.config import DS_CONFIG, TV_CONFIG, WORKSPACE_CONFIG
+from dolphinscheduler.dolphinscheduler_api import DolphinSchedulerClient
 
 # 配置
 DS_BASE_URL = DS_CONFIG['base_url']
@@ -25,6 +26,7 @@ TV_BOT_ID = TV_CONFIG['bot_id']
 TV_APP_ID = TV_CONFIG['app_id']
 SCHEDULE_EXPORT_CSV = WORKSPACE_CONFIG['schedule_export_csv']
 WORKSPACE_ROOT = WORKSPACE_CONFIG['root']
+CLIENT = DolphinSchedulerClient(base_url=DS_BASE_URL, token=DS_TOKEN)
 
 def send_tv_notification(messages):
     """发送TV通知"""
@@ -79,51 +81,27 @@ def load_schedules_from_csv(csv_path):
 
 def get_running_instances():
     """获取运行中的工作流实例 (DS 3.3.0: workflow-instances)"""
-    url = f"{DS_BASE_URL}/projects/{PROJECT_CODE}/workflow-instances?stateType=RUNNING_EXECUTION&pageNo=1&pageSize=100"
-    try:
-        req = urllib.request.Request(url, headers={'token': DS_TOKEN})
-        with urllib.request.urlopen(req, timeout=15) as response:
-            data = json.loads(response.read().decode('utf-8'))
-            if data.get('code') == 0:
-                return data.get('data', {}).get('totalList', [])
-    except Exception as e:
-        print(f"获取运行实例失败: {e}")
+    result = CLIENT.get_workflow_instances(str(PROJECT_CODE), page_size=100)
+    if result.get('success'):
+        return result.get('data', [])
+    print(f"获取运行实例失败: {result.get('error_message', 'unknown error')}")
     return []
 
 def get_instance_detail(instance_id):
     """获取实例详情 (DS 3.3.0: workflow-instances)"""
-    url = f"{DS_BASE_URL}/projects/{PROJECT_CODE}/workflow-instances/{instance_id}"
-    try:
-        req = urllib.request.Request(url, headers={'token': DS_TOKEN})
-        with urllib.request.urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode('utf-8'))
-            if data.get('code') == 0:
-                return data.get('data', {})
-    except Exception as e:
-        print(f"获取实例详情失败: {e}")
+    result = CLIENT.get_instance_detail(str(PROJECT_CODE), instance_id)
+    if result.get('success'):
+        return result.get('data', {})
+    print(f"获取实例详情失败: {result.get('error_message', 'unknown error')}")
     return {}
 
 def stop_instance(instance_id):
     """停止工作流实例"""
-    url = f"{DS_BASE_URL}/projects/{PROJECT_CODE}/executors/execute"
-    data = {
-        'processInstanceId': instance_id,
-        'executeType': 'STOP'
-    }
-    try:
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(data).encode('utf-8'),
-            headers={'Content-Type': 'application/json'},
-            method='POST'
-        )
-        req.add_header('token', DS_TOKEN)
-        with urllib.request.urlopen(req, timeout=10) as response:
-            result = json.loads(response.read().decode('utf-8'))
-            return result.get('code') == 0
-    except Exception as e:
-        print(f"停止实例失败: {e}")
-        return False
+    result = CLIENT.stop_instance(str(PROJECT_CODE), instance_id)
+    if result.get('success'):
+        return True
+    print(f"停止实例失败: {result.get('error_message', 'unknown error')}")
+    return False
 
 def main():
     print("🔄 开始异常调度自动检测...")
@@ -148,7 +126,11 @@ def main():
     
     for instance in running_instances:
         instance_id = instance.get('id')
-        workflow_code = str(instance.get('processDefinitionCode', ''))
+        workflow_code = str(
+            instance.get('processDefinitionCode')
+            or instance.get('workflowDefinitionCode')
+            or ''
+        )
         workflow_name = instance.get('name', '')
         
         # 获取实例详情查看启动类型

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 
-# 自动加载环境变量
 import sys
-sys.path.insert(0, "/home/node/.openclaw/workspace")
-import auto_load_env
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from config import auto_load_env  # noqa: F401
+from config.config import DS_CONFIG
+from dolphinscheduler.dolphinscheduler_api import DolphinSchedulerClient
 
 # -*- coding: utf-8 -*-
 """
@@ -14,21 +17,10 @@ import auto_load_env
 日期：2026-03-23
 """
 
-import urllib.request
-import urllib.error
-import json
-import sys
 import argparse
-import os
-from datetime import datetime
 
-# DolphinScheduler 配置
-DS_CONFIG = {
-    'base_url': 'http://172.20.0.235:12345/dolphinscheduler',
-    'token': os.environ.get('DS_TOKEN', ''),
-    'project_code': '158514956085248',
-    'project_name': '国内数仓-工作流'
-}
+CLIENT = DolphinSchedulerClient(base_url=DS_CONFIG['base_url'], token=DS_CONFIG['token'])
+PROJECT_NAME = DS_CONFIG.get('project_name', '当前数仓-工作流')
 
 
 def fetch_running_workflows(filter_name=None, limit=20):
@@ -42,40 +34,16 @@ def fetch_running_workflows(filter_name=None, limit=20):
     Returns:
         tuple: (success: bool, workflows: list, total: int)
     """
-    url = f"{DS_CONFIG['base_url']}/projects/{DS_CONFIG['project_code']}/workflow-instances"
-    params = f"?stateType=RUNNING_EXECUTION&pageNo=1&pageSize={limit}"
-    
-    full_url = url + params
-    
-    req = urllib.request.Request(full_url)
-    req.add_header('token', DS_CONFIG['token'])
-    
-    try:
-        with urllib.request.urlopen(req, timeout=10) as response:
-            result = json.loads(response.read().decode('utf-8'))
-            
-            if result.get('code') == 0:
-                total = result.get('data', {}).get('total', 0)
-                workflows = result.get('data', {}).get('totalList', [])
-                
-                # 按名称筛选
-                if filter_name:
-                    workflows = [w for w in workflows if filter_name.lower() in w.get('name', '').lower()]
-                
-                return True, workflows, total
-            else:
-                print(f"❌ API 错误: {result.get('msg', 'Unknown')}")
-                return False, [], 0
-                
-    except urllib.error.URLError as e:
-        print(f"❌ 连接失败: {e}")
+    result = CLIENT.get_workflow_instances(str(DS_CONFIG['project_code']), page_size=limit)
+    if not result.get('success'):
+        print(f"❌ API 错误: {result.get('error_message', 'Unknown')}")
         return False, [], 0
-    except json.JSONDecodeError:
-        print("❌ JSON 解析错误")
-        return False, [], 0
-    except Exception as e:
-        print(f"❌ 异常: {e}")
-        return False, [], 0
+
+    total = result.get('total', 0)
+    workflows = result.get('data', [])
+    if filter_name:
+        workflows = [w for w in workflows if filter_name.lower() in w.get('name', '').lower()]
+    return True, workflows, total
 
 
 def format_duration(seconds):
@@ -104,7 +72,7 @@ def display_workflows(workflows, total, filter_name=None):
     """格式化显示工作流列表"""
     
     print("=" * 70)
-    print(f"📊 项目: {DS_CONFIG['project_name']}")
+    print(f"📊 项目: {PROJECT_NAME}")
     print(f"🔍 筛选条件: {filter_name if filter_name else '无（全部）'}")
     print("=" * 70)
     
@@ -136,7 +104,7 @@ def display_workflows(workflows, total, filter_name=None):
         print(f"    已运行: {format_duration(duration)}")
         
         # 显示工作流定义Code（用于后续操作）
-        process_code = wf.get('processDefinitionCode', 'N/A')
+        process_code = wf.get('processDefinitionCode') or wf.get('workflowDefinitionCode') or 'N/A'
         print(f"    工作流Code: {process_code}")
         print()
     

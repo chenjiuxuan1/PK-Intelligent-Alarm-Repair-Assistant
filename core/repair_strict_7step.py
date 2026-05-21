@@ -89,21 +89,27 @@ def _get_definition_list_endpoint_templates():
     if DS_DEFINITION_ENDPOINT_STYLE == 'workflow-definition':
         return [
             "/projects/{project_code}/workflow-definition?pageNo={page_no}&pageSize=100",
+            "/projects/{project_code}/workflow-definition/query-workflow-definition-list",
             "/projects/{project_code}/workflow-definition/query-process-definition-list",
             "/projects/{project_code}/process-definition?pageNo={page_no}&pageSize=100",
+            "/projects/{project_code}/process-definition/query-workflow-definition-list",
             "/projects/{project_code}/process-definition/query-process-definition-list",
         ]
     if DS_DEFINITION_ENDPOINT_STYLE == 'process-definition':
         return [
             "/projects/{project_code}/process-definition?pageNo={page_no}&pageSize=100",
+            "/projects/{project_code}/process-definition/query-workflow-definition-list",
             "/projects/{project_code}/process-definition/query-process-definition-list",
             "/projects/{project_code}/workflow-definition?pageNo={page_no}&pageSize=100",
+            "/projects/{project_code}/workflow-definition/query-workflow-definition-list",
             "/projects/{project_code}/workflow-definition/query-process-definition-list",
         ]
     return [
         "/projects/{project_code}/workflow-definition?pageNo={page_no}&pageSize=100",
         "/projects/{project_code}/process-definition?pageNo={page_no}&pageSize=100",
+        "/projects/{project_code}/workflow-definition/query-workflow-definition-list",
         "/projects/{project_code}/workflow-definition/query-process-definition-list",
+        "/projects/{project_code}/process-definition/query-workflow-definition-list",
         "/projects/{project_code}/process-definition/query-process-definition-list",
     ]
 

@@ -8,20 +8,17 @@
 日期：2026-03-23
 """
 
-import os
-import urllib.request
-import json
 import sys
 from collections import Counter
-from datetime import datetime, timedelta
+from pathlib import Path
 
-# DolphinScheduler 配置
-DS_CONFIG = {
-    'base_url': 'http://172.20.0.235:12345/dolphinscheduler',
-    'token': os.environ.get('DS_TOKEN', ''),
-    'project_code': '158514956085248',
-    'project_name': '国内数仓-工作流'
-}
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from config import auto_load_env  # noqa: F401
+from config.config import DS_CONFIG
+from dolphinscheduler.dolphinscheduler_api import DolphinSchedulerClient
+
+CLIENT = DolphinSchedulerClient(base_url=DS_CONFIG['base_url'], token=DS_CONFIG['token'])
+PROJECT_NAME = DS_CONFIG.get('project_name', '当前数仓-工作流')
 
 # 启动类型说明
 COMMAND_TYPE_DESC = {
@@ -45,47 +42,25 @@ def fetch_recent_instances(days=7, limit=100):
     Returns:
         list: 实例列表
     """
-    # 查询成功的实例（最近完成的） (DS 3.3.0: workflow-instances)
-    url = f"{DS_CONFIG['base_url']}/projects/{DS_CONFIG['project_code']}/workflow-instances"
-    params = f"?stateType=SUCCESS&pageNo=1&pageSize={limit}"
-    
-    full_url = url + params
-    req = urllib.request.Request(full_url)
-    req.add_header('token', DS_CONFIG['token'])
-    
-    try:
-        with urllib.request.urlopen(req, timeout=15) as response:
-            result = json.loads(response.read().decode('utf-8'))
-            if result.get('code') == 0:
-                return result.get('data', {}).get('totalList', [])
-    except Exception as e:
-        print(f"❌ 查询失败: {e}")
-    
+    result = CLIENT.get_workflow_instances(str(DS_CONFIG['project_code']), state_type='SUCCESS', page_size=limit)
+    if result.get('success'):
+        return result.get('data', [])
+    print(f"❌ 查询失败: {result.get('error_message', 'unknown error')}")
     return []
 
 
 def get_instance_detail(instance_id):
     """获取实例详情 (DS 3.3.0: workflow-instances)"""
-    url = f"{DS_CONFIG['base_url']}/projects/{DS_CONFIG['project_code']}/workflow-instances/{instance_id}"
-    
-    req = urllib.request.Request(url)
-    req.add_header('token', DS_CONFIG['token'])
-    
-    try:
-        with urllib.request.urlopen(req, timeout=10) as response:
-            result = json.loads(response.read().decode('utf-8'))
-            if result.get('code') == 0:
-                return result.get('data', {})
-    except:
-        pass
-    
+    result = CLIENT.get_instance_detail(str(DS_CONFIG['project_code']), instance_id)
+    if result.get('success'):
+        return result.get('data', {})
     return {}
 
 
 def analyze_startup_patterns():
     """分析启动模式"""
     print("=" * 80)
-    print(f"📊 {DS_CONFIG['project_name']} - 工作流启动来源分析")
+    print(f"📊 {PROJECT_NAME} - 工作流启动来源分析")
     print("=" * 80)
     print("\n🔍 查询最近完成的实例...")
     

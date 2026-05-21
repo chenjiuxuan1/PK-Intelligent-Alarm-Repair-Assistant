@@ -2590,7 +2590,11 @@ class RepairStrict7StepTests(unittest.TestCase):
                 return False, {}, "non-json response: <!DOCTYPE html>"
             if endpoint.endswith("/process-definition?pageNo=1&pageSize=100"):
                 return False, {}, "non-json response: <!DOCTYPE html>"
+            if endpoint.endswith("/workflow-definition/query-workflow-definition-list"):
+                return False, {}, "not found"
             if endpoint.endswith("/workflow-definition/query-process-definition-list"):
+                return False, {}, "not found"
+            if endpoint.endswith("/process-definition/query-workflow-definition-list"):
                 return False, {}, "not found"
             if endpoint.endswith("/process-definition/query-process-definition-list"):
                 return True, [{"code": "wf-pk-1"}], ""
@@ -2601,6 +2605,24 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         self.assertTrue(success)
         self.assertEqual(data["totalList"], [{"code": "wf-pk-1"}])
+
+    def test_get_workflow_definition_list_falls_back_to_query_workflow_definition_list(self):
+        module = load_module()
+
+        def fake_ds_api_get(endpoint):
+            if endpoint.endswith("/workflow-definition?pageNo=1&pageSize=100"):
+                return False, {}, "non-json response: <!DOCTYPE html>"
+            if endpoint.endswith("/process-definition?pageNo=1&pageSize=100"):
+                return False, {}, "non-json response: <!DOCTYPE html>"
+            if endpoint.endswith("/workflow-definition/query-workflow-definition-list"):
+                return True, [{"code": "wf-pk-query"}], ""
+            raise AssertionError(endpoint)
+
+        with mock.patch.object(module, "ds_api_get", side_effect=fake_ds_api_get):
+            success, data, msg = module.get_workflow_definition_list()
+
+        self.assertTrue(success)
+        self.assertEqual(data["totalList"], [{"code": "wf-pk-query"}])
 
     def test_step2_find_locations_uses_query_process_definition_list_fallback(self):
         module = load_module()
@@ -2637,6 +2659,8 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         def fake_ds_api_get(endpoint):
             if endpoint.endswith("/process-definition?pageNo=1&pageSize=100"):
+                return False, {}, "non-json response: <!DOCTYPE html>"
+            if endpoint.endswith("/process-definition/query-workflow-definition-list"):
                 return False, {}, "non-json response: <!DOCTYPE html>"
             if endpoint.endswith("/process-definition/query-process-definition-list"):
                 return False, {}, "non-json response: <!DOCTYPE html>"

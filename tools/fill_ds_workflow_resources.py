@@ -33,6 +33,8 @@ try:
 except ModuleNotFoundError:
     auto_load_env = None
 
+from dolphinscheduler.dolphinscheduler_api import DolphinSchedulerClient
+
 
 DS_BASE_URL = os.environ.get("DS_BASE_URL", "http://127.0.0.1:12345/dolphinscheduler").rstrip("/")
 DS_TOKEN = os.environ.get("DS_TOKEN", "")
@@ -40,6 +42,7 @@ DEFAULT_PROJECT_NAME = "巴基斯坦-数仓工作流_new"
 DEFAULT_WORKFLOW_NAME = "DWD"
 DEFAULT_RESOURCE_ROOT = "deploy/resources/starrocks_workflow/dwd"
 RESOURCE_PREFIX = "dolphinscheduler/resource"
+CLIENT = DolphinSchedulerClient(base_url=DS_BASE_URL, token=DS_TOKEN)
 
 
 def ds_api_request(
@@ -150,10 +153,10 @@ def resolve_project_code(project_name: str) -> str:
 
 
 def get_project_workflows(project_code: str) -> List[Dict[str, object]]:
-    success, data = ds_api_get(f"/projects/{project_code}/process-definition?pageNo=1&pageSize=200")
-    if not success:
-        raise RuntimeError(f"获取工作流列表失败: {data}")
-    return list((data or {}).get("totalList", []) or [])
+    result = CLIENT.get_workflows_list(project_code)
+    if not result.get("success"):
+        raise RuntimeError(f"获取工作流列表失败: {result.get('error_message', 'unknown error')}")
+    return list(result.get("data", []) or [])
 
 
 def resolve_workflow(project_code: str, workflow_name: str) -> Dict[str, object]:
@@ -164,9 +167,10 @@ def resolve_workflow(project_code: str, workflow_name: str) -> Dict[str, object]
 
 
 def get_workflow_detail(project_code: str, workflow_code: str) -> Dict[str, object]:
-    success, data = ds_api_get(f"/projects/{project_code}/process-definition/{workflow_code}")
-    if not success:
-        raise RuntimeError(f"获取工作流详情失败: {data}")
+    result = CLIENT.get_workflow_info(project_code, workflow_code)
+    if not result.get("success"):
+        raise RuntimeError(f"获取工作流详情失败: {result.get('error_message', 'unknown error')}")
+    data = result.get("data", {})
     return data if isinstance(data, dict) else {}
 
 

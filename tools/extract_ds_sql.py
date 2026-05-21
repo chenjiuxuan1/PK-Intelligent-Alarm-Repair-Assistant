@@ -38,6 +38,8 @@ try:
 except ModuleNotFoundError:
     auto_load_env = None
 
+from dolphinscheduler.dolphinscheduler_api import DolphinSchedulerClient
+
 
 DS_BASE_URL = os.environ.get("DS_BASE_URL", "http://127.0.0.1:12345/dolphinscheduler").rstrip("/")
 DS_TOKEN = os.environ.get("DS_TOKEN", "")
@@ -59,6 +61,7 @@ STATUS_HEADERS = [
     "sql_length",
     "output_file",
 ]
+CLIENT = DolphinSchedulerClient(base_url=DS_BASE_URL, token=DS_TOKEN)
 
 
 def ds_api_get(endpoint: str) -> Tuple[bool, object]:
@@ -78,6 +81,21 @@ def ds_api_get(endpoint: str) -> Tuple[bool, object]:
     if result.get("code") == 0:
         return True, result.get("data", {})
     return False, result.get("msg", "Unknown error")
+
+
+def get_project_workflows(project_code: str, page_size: int = 100) -> List[Dict[str, object]]:
+    result = CLIENT.get_workflows_list(project_code)
+    if not result.get("success"):
+        raise RuntimeError(f"获取工作流列表失败: {result.get('error_message', 'unknown error')}")
+    return list(result.get("data", []) or [])
+
+
+def get_workflow_detail(project_code: str, workflow_code: str) -> Dict[str, object]:
+    result = CLIENT.get_workflow_info(project_code, workflow_code)
+    if not result.get("success"):
+        raise RuntimeError(f"获取工作流详情失败: {result.get('error_message', 'unknown error')}")
+    data = result.get("data", {})
+    return data if isinstance(data, dict) else {}
 
 
 def sanitize_name(name: str, fallback: str) -> str:
@@ -251,36 +269,18 @@ def resolve_project(project_code: Optional[str] = None, project_name: Optional[s
 
 def get_project_workflows(project_code: str) -> List[Dict[str, object]]:
     """获取项目下的所有工作流列表。"""
-    all_workflows: List[Dict[str, object]] = []
-    page_no = 1
-    page_size = 100
-
-    while True:
-        success, data = ds_api_get(
-            f"/projects/{project_code}/process-definition?pageNo={page_no}&pageSize={page_size}"
-        )
-        if not success:
-            raise RuntimeError(f"获取工作流列表失败: {data}")
-        if not isinstance(data, dict):
-            break
-
-        workflows = data.get("totalList", []) or []
-        total = int(data.get("total", len(workflows)) or 0)
-        if not workflows:
-            break
-        all_workflows.extend(workflows)
-        if len(all_workflows) >= total:
-            break
-        page_no += 1
-
-    return all_workflows
+    result = CLIENT.get_workflows_list(project_code)
+    if not result.get("success"):
+        raise RuntimeError(f"获取工作流列表失败: {result.get('error_message', 'unknown error')}")
+    return list(result.get("data", []) or [])
 
 
 def get_workflow_detail(project_code: str, workflow_code: str) -> Optional[Dict[str, object]]:
-    success, data = ds_api_get(f"/projects/{project_code}/process-definition/{workflow_code}")
-    if not success:
-        print(f"❌ 获取工作流详情失败: {data}")
+    result = CLIENT.get_workflow_info(project_code, workflow_code)
+    if not result.get("success"):
+        print(f"❌ 获取工作流详情失败: {result.get('error_message', 'unknown error')}")
         return None
+    data = result.get("data", {})
     if not isinstance(data, dict):
         return None
     return data
@@ -293,7 +293,12 @@ def get_schedule_map(project_code: str) -> Dict[str, Dict[str, object]]:
 
     schedule_map: Dict[str, Dict[str, object]] = {}
     for schedule in data.get("totalList", []) or []:
-        process_code = str(schedule.get("processDefinitionCode", ""))
+        process_code = str(
+            schedule.get("processDefinitionCode")
+            or schedule.get("workflowDefinitionCode")
+            or schedule.get("definitionCode")
+            or ""
+        )
         if not process_code:
             continue
         schedule_map[process_code] = {
