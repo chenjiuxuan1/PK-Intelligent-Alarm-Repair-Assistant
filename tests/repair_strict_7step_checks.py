@@ -622,7 +622,7 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(results[0]["status"], "success")
         self.assertEqual(running_instances[0]["instance_id"], 12345)
 
-    def test_execute_repairs_in_batches_serializes_same_child_task(self):
+    def test_execute_repairs_in_batches_serializes_same_workflow_tasks(self):
         module = load_module()
         tasks = [
             {
@@ -638,8 +638,8 @@ class RepairStrict7StepTests(unittest.TestCase):
                 "dt": "2026-05-11",
                 "workflow_code": "wf-1",
                 "workflow_name": "ODS_CASH_MODEL",
-                "task_code": "task-1",
-                "task_name": "ods_cash_model_model",
+                "task_code": "task-2",
+                "task_name": "ods_cash_model_model_retry",
             },
         ]
         step3_batches = []
@@ -675,10 +675,72 @@ class RepairStrict7StepTests(unittest.TestCase):
         ), mock.patch.object(module, "log"):
             results, completed_tasks, failed_tasks = module.execute_repairs_in_batches(tasks)
 
-        self.assertEqual(step3_batches, [["2026-05-10", "2026-05-11"]])
-        self.assertEqual(waited_instances, [[2011, 2012]])
+        self.assertEqual(step3_batches, [["2026-05-10"], ["2026-05-11"]])
+        self.assertEqual(waited_instances, [[2011], [2021]])
         self.assertEqual(len(results), 2)
         self.assertEqual(len(completed_tasks), 2)
+        self.assertEqual(failed_tasks, [])
+
+    def test_execute_repairs_in_batches_keeps_different_workflows_parallel(self):
+        module = load_module()
+        tasks = [
+            {
+                "table": "table_a",
+                "dt": "2026-05-10",
+                "workflow_code": "wf-a",
+                "workflow_name": "WF_A",
+                "task_code": "task-a",
+                "task_name": "task_a",
+            },
+            {
+                "table": "table_b",
+                "dt": "2026-05-10",
+                "workflow_code": "wf-b",
+                "workflow_name": "WF_B",
+                "task_code": "task-b",
+                "task_name": "task_b",
+            },
+            {
+                "table": "table_c",
+                "dt": "2026-05-10",
+                "workflow_code": "wf-a",
+                "workflow_name": "WF_A",
+                "task_code": "task-c",
+                "task_name": "task_c",
+            },
+        ]
+        step3_batches = []
+
+        def fake_step3(batch_tasks):
+            step3_batches.append([task["table"] for task in batch_tasks])
+            results = []
+            running_instances = []
+            for index, task in enumerate(batch_tasks, 1):
+                copied = dict(task)
+                copied["status"] = "success"
+                copied["instance_id"] = 4000 + len(step3_batches) * 10 + index
+                results.append(copied)
+                running_instances.append(
+                    {
+                        "table": copied["table"],
+                        "instance_id": copied["instance_id"],
+                        "workflow_code": copied["workflow_code"],
+                        "task": copied,
+                    }
+                )
+            return results, running_instances
+
+        def fake_step4(running_instances, poll_interval=30, max_wait=1800):
+            return [dict(item["task"], final_status="success") for item in running_instances], []
+
+        with mock.patch.object(module, "step3_start_repair", side_effect=fake_step3), mock.patch.object(
+            module, "step4_wait_and_check", side_effect=fake_step4
+        ), mock.patch.object(module, "log"):
+            results, completed_tasks, failed_tasks = module.execute_repairs_in_batches(tasks)
+
+        self.assertEqual(step3_batches, [["table_a", "table_b"], ["table_c"]])
+        self.assertEqual(len(results), 3)
+        self.assertEqual(len(completed_tasks), 3)
         self.assertEqual(failed_tasks, [])
 
     def test_execute_repairs_in_batches_does_not_skip_step4_between_batches(self):
@@ -1723,7 +1785,15 @@ class RepairStrict7StepTests(unittest.TestCase):
 
     def test_execute_repairs_in_batches_limits_parallel_work_to_four(self):
         module = load_module()
-        tasks = [{"table": f"table_{idx}", "dt": "2026-04-26"} for idx in range(12)]
+        tasks = [
+            {
+                "table": f"table_{idx}",
+                "dt": "2026-04-26",
+                "workflow_code": f"wf_{idx}",
+                "task_code": f"task_{idx}",
+            }
+            for idx in range(12)
+        ]
         step3_calls = []
         step4_calls = []
 

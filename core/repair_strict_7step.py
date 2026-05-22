@@ -1884,14 +1884,13 @@ def step4_wait_and_check(running_instances, poll_interval=None, max_wait=None):
 
 
 def get_task_execution_key(task):
-    """为同一个子任务生成串行执行键，避免重复并发启动"""
+    """为同一个工作流生成串行执行键，避免触发 DS SERIAL_DISCARD。"""
     workflow_code = task.get('workflow_code') or ''
-    task_code = task.get('task_code') or ''
-    return f"{workflow_code}::{task_code}"
+    return str(workflow_code)
 
 
 def split_ready_and_blocked_tasks(tasks, in_flight_keys):
-    """把可立即启动的任务与需排队等待的同子任务任务拆开"""
+    """把可立即启动的任务与需排队等待的同工作流任务拆开。"""
     ready_tasks = []
     blocked_tasks = []
     seen_keys = set(in_flight_keys)
@@ -1916,20 +1915,30 @@ def split_ready_and_blocked_tasks(tasks, in_flight_keys):
 
 
 def execute_repairs_in_batches(tasks, max_parallel=4):
-    """分批执行修复任务，控制同时运行的实例数量。"""
+    """分批执行修复任务，控制同时运行的实例数量，并避免同工作流并发启动。"""
     if max_parallel <= 0:
         raise ValueError("max_parallel must be greater than 0")
 
     all_results = []
     all_completed_tasks = []
     all_failed_tasks = []
+    remaining_tasks = list(tasks)
+    batch_index = 0
 
-    total_batches = (len(tasks) + max_parallel - 1) // max_parallel
-
-    for batch_index, start in enumerate(range(0, len(tasks), max_parallel), 1):
-        batch_tasks = tasks[start:start + max_parallel]
+    while remaining_tasks:
+        batch_index += 1
+        candidate_tasks = remaining_tasks[:max_parallel]
+        ready_tasks, blocked_tasks = split_ready_and_blocked_tasks(candidate_tasks, set())
+        if not ready_tasks:
+            ready_tasks = [remaining_tasks[0]]
+            blocked_tasks = candidate_tasks[1:]
+        batch_tasks = ready_tasks
+        remaining_tasks = blocked_tasks + remaining_tasks[max_parallel:]
         log("\n" + "=" * 70)
-        log(f"【批次 {batch_index}/{total_batches}】执行 {len(batch_tasks)} 个修复任务")
+        log(
+            f"【批次 {batch_index}】执行 {len(batch_tasks)} 个修复任务"
+            f"（剩余待执行 {len(remaining_tasks)} 个）"
+        )
         log("=" * 70)
 
         batch_results, running_instances = step3_start_repair(batch_tasks)
