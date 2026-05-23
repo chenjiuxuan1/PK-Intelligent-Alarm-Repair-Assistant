@@ -216,6 +216,26 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         self.assertEqual(started_codes, ["wf-daily", "wf-l1", "wf-l3"])
 
+    def test_step5_execute_fuyan_adds_week_and_level3_for_dws_even_with_explicit_level1(self):
+        module = load_module()
+        module.FUYAN_WORKFLOWS = [
+            {"workflow_name": "每小时复验1级表数据(D-1)", "workflow_code": "wf-l1", "level": "1级表"},
+            {"workflow_name": "两小时复验3级表数据(D-1)", "workflow_code": "wf-l3", "level": "3级表"},
+            {"workflow_name": "每日复验全级别数据(W-1)", "workflow_code": "wf-week", "level": "全级别"},
+        ]
+        started_codes = []
+
+        def fake_ds_api_post(endpoint, data):
+            started_codes.append(data["processDefinitionCode"])
+            return True, {"data": [len(started_codes)]}, ""
+
+        alerts = [{"table": "dws_user_performance_first_loan_info", "monitor_level": "1"}]
+
+        with mock.patch.object(module, "ds_api_post", side_effect=fake_ds_api_post):
+            module.step5_execute_fuyan(alerts, [], alerts)
+
+        self.assertEqual(started_codes, ["wf-l1", "wf-l3", "wf-week"])
+
     def test_step5_execute_fuyan_always_includes_level1_for_non_dwb_tables(self):
         module = load_module()
         module.FUYAN_WORKFLOWS = [
@@ -2820,6 +2840,32 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(results[0]["status"], "success")
         self.assertEqual(results[0]["instance_id"], 98765)
         self.assertEqual(running_instances[0]["instance_id"], 98765)
+
+    def test_should_delay_failed_state_confirmation_allows_short_recheck_window(self):
+        module = load_module()
+        item = {
+            "workflow_code": "18641948384363",
+            "first_seen_at": 100.0,
+            "failed_state_rechecks": 0,
+            "task": {"workflow_code": "18641948384363"},
+        }
+
+        with mock.patch("time.time", return_value=120.0):
+            self.assertTrue(module.should_delay_failed_state_confirmation(item, "STOP"))
+        self.assertEqual(item["failed_state_rechecks"], 1)
+
+    def test_should_delay_failed_state_confirmation_stops_after_grace_window(self):
+        module = load_module()
+        item = {
+            "workflow_code": "18641948384363",
+            "first_seen_at": 100.0,
+            "failed_state_rechecks": 0,
+            "task": {"workflow_code": "18641948384363"},
+        }
+
+        with mock.patch("time.time", return_value=200.0):
+            self.assertFalse(module.should_delay_failed_state_confirmation(item, "STOP"))
+        self.assertEqual(item["failed_state_rechecks"], 0)
 
 
 if __name__ == "__main__":

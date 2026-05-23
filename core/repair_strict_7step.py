@@ -57,6 +57,7 @@ DS_STATUS_DEBUG = os.environ.get('REPAIR_DEBUG_DS_STATUS', '').strip().lower() i
 REPAIR_TASK_POLL_INTERVAL_SECONDS = int(os.environ.get('REPAIR_TASK_POLL_INTERVAL_SECONDS', '30'))
 REPAIR_TASK_MAX_WAIT_SECONDS = int(os.environ.get('REPAIR_TASK_MAX_WAIT_SECONDS', '1800'))
 REPAIR_WORKFLOW_CONFLICT_WAIT_SECONDS = int(os.environ.get('REPAIR_WORKFLOW_CONFLICT_WAIT_SECONDS', '1800'))
+FAILED_STATE_CONFIRMATION_GRACE_SECONDS = int(os.environ.get('FAILED_STATE_CONFIRMATION_GRACE_SECONDS', '90'))
 
 # 维护任务关键词（排除）
 MAINTENANCE_KEYWORDS = ['补充', '删除', '清理', '修复', '历史', '冗余', '临时', 'test', 'copy', '手插入']
@@ -616,9 +617,11 @@ def maybe_replace_with_recent_real_instance(project_code, item, current_instance
 
     current_id = str((current_instance or {}).get('id') or item.get('instance_id') or '')
     start_response_id = str(item.get('start_response_id') or '')
+    current_state = str((current_instance or {}).get('state') or '').upper()
     should_recheck_recent = (
         not item.get('resolved_instance_id')
         or (start_response_id and current_id == start_response_id)
+        or current_state in {'STOP', 'FAILED', 'FAILURE', 'KILL', 'READY_STOP'}
     )
     if not should_recheck_recent:
         return current_instance
@@ -645,6 +648,32 @@ def maybe_replace_with_recent_real_instance(project_code, item, current_instance
         f"recent_state={recent_instance.get('state')}"
     )
     return recent_instance
+
+
+def should_delay_failed_state_confirmation(item, state):
+    """短暂延迟 STOP/FAILED 的最终判定，给 DS 集群一个再次识别真实实例的窗口。"""
+    normalized_state = str(state or '').upper()
+    if normalized_state not in {'FAILED', 'FAILURE', 'KILL', 'STOP', 'READY_STOP'}:
+        return False
+
+    workflow_code = item.get('workflow_code') or (item.get('task') or {}).get('workflow_code')
+    if not workflow_code:
+        return False
+
+    first_seen_at = item.get('first_seen_at')
+    if not first_seen_at:
+        return False
+
+    instance_age = time.time() - first_seen_at
+    if instance_age >= FAILED_STATE_CONFIRMATION_GRACE_SECONDS:
+        return False
+
+    rechecks = int(item.get('failed_state_rechecks', 0))
+    if rechecks >= 2:
+        return False
+
+    item['failed_state_rechecks'] = rechecks + 1
+    return True
 
 
 def collect_instance_query_diagnostics(project_code, instance_id, workflow_code=None, launched_at=None):
@@ -831,6 +860,26 @@ def normalize_fuyan_level(workflow):
     return level
 
 
+def normalize_alert_monitor_level(alert):
+    """从质量告警记录中提取 1/2/3 级复验口径。"""
+    for key in ('monitor_level', 'alert_level', 'type', 'alert_type', 'level'):
+        raw_value = alert.get(key)
+        if raw_value in (None, ''):
+            continue
+        value = str(raw_value).strip().lower()
+        if value.startswith('p') and value[1:] in {'1', '2', '3'}:
+            return value[1:]
+        if value in {'1', '2', '3'}:
+            return value
+        if '1' in value:
+            return '1'
+        if '2' in value:
+            return '2'
+        if '3' in value:
+            return '3'
+    return ''
+
+
 def get_fuyan_start_node(workflow):
     start_node = workflow.get('start_node') or workflow.get('startNodeList') or ''
     if start_node:
@@ -863,11 +912,28 @@ def resolve_fuyan_start_node_code(workflow):
 
 
 def select_fuyan_workflows(alerts):
-    """智能选择复验工作流：dwb 仅走1级，其余走1级 + 每日全级别 + 3级"""
+    """智能选择复验工作流：优先按告警级别精确选择，缺失级别时保留历史兜底策略。"""
     selected_levels = set()
     has_dwb_alert = False
+    has_explicit_level = False
+    needs_week_recheck = False
     for alert in alerts or []:
         table = (alert.get('table') or '').lower()
+        is_dws_alert = table.startswith('dws_')
+
+        alert_level = normalize_alert_monitor_level(alert)
+        if alert_level in {'1', '2', '3'}:
+            has_explicit_level = True
+            selected_levels.add(alert_level)
+            if is_dws_alert:
+                selected_levels.add('3')
+                needs_week_recheck = True
+            continue
+
+        if is_dws_alert:
+            needs_week_recheck = True
+            selected_levels.add('3')
+
         if table.startswith('dwb_'):
             has_dwb_alert = True
             selected_levels.add('1')
@@ -885,7 +951,10 @@ def select_fuyan_workflows(alerts):
         workflow_name = get_fuyan_name(workflow)
         include = False
         if workflow_level == 'all':
-            include = (not has_dwb_alert) and workflow_name.startswith('每日复验全级别数据')
+            include = (
+                (not has_explicit_level and not has_dwb_alert)
+                or needs_week_recheck
+            ) and workflow_name.startswith('每日复验全级别数据')
         elif workflow_level in selected_levels:
             include = True
 
@@ -1822,6 +1891,10 @@ def step4_wait_and_check(running_instances, poll_interval=None, max_wait=None):
                     completed_tasks.append(item['task'])
                     status_changed = True
                 elif state in ['FAILED', 'KILL', 'STOP']:
+                    if should_delay_failed_state_confirmation(item, state):
+                        log(f"  ⚠️  {table}: 检测到 {state}，继续等待并重查真实实例")
+                        still_pending.append(item)
+                        continue
                     log(f"  ❌ {table}: 失败 ({state})")
                     item['task']['final_status'] = 'failed'
                     item['task']['error'] = f"状态: {state}"
@@ -2145,6 +2218,9 @@ def wait_for_fuyan_results(fuyan_results, poll_interval=10, max_wait=60):
             if state in ['SUCCESS', 'FINISHED']:
                 item['final_status'] = 'success'
             elif state in ['FAILED', 'KILL', 'STOP']:
+                if should_delay_failed_state_confirmation(item, state):
+                    still_pending[str(item.get('id'))] = item
+                    continue
                 item['final_status'] = 'failed'
                 item['error'] = f"状态: {state}"
             else:
